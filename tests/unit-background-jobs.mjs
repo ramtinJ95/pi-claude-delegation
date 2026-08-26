@@ -8,7 +8,7 @@ import {
 	BackgroundJobManager,
 } from "../src/background-jobs.js";
 import { createDelegationSnapshot } from "../src/delegation-events.js";
-import { RETAINED_LIST_MAX_ITEMS } from "../src/delegation-retention.js";
+import { TOOL_CALL_MAX_ITEMS } from "../src/delegation-retention.js";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -330,13 +330,13 @@ describe("background job manager", () => {
 
 		const oversized = {
 			...createDelegationSnapshot(1),
-			tools: Array.from({ length: RETAINED_LIST_MAX_ITEMS + 30 }, (_, i) => ({
+			tools: Array.from({ length: TOOL_CALL_MAX_ITEMS + 30 }, (_, i) => ({
 				id: `tool-${i}`, name: "Read", status: "succeeded", startedAt: 1, updatedAt: 1, parentToolUseId: null,
 			})),
 		};
 		pending.state.onSnapshot(oversized);
 		const live = manager.get(record.id);
-		assert.equal(live.snapshot.tools.length, RETAINED_LIST_MAX_ITEMS);
+		assert.equal(live.snapshot.tools.length, TOOL_CALL_MAX_ITEMS);
 		assert.equal(live.snapshot.toolsOmitted, 30);
 
 		pending.resolve(runResult("stop", "succeeded"));

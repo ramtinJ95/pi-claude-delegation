@@ -12,9 +12,11 @@ import {
 	THINKING_MAX_CHARS,
 	TIMELINE_MAX_CHARS,
 	TIMELINE_MAX_EVENTS,
+	TOOL_CALL_MAX_ITEMS,
 	TOOL_FIELD_MAX_CHARS,
 	appendRetainedText,
 	retainText,
+	retainTailTextWithOmissions,
 	retainTextWithOmissions,
 	retainToolValue,
 } from "./delegation-retention.js";
@@ -495,8 +497,13 @@ export function reduceDelegationEvent(
 			return { ...base, responseText: retained.text, responseOmittedChars: retained.omittedChars };
 		}
 		case "thinking_delta": {
-			const retained = appendRetainedText(snapshot.thinkingText, event.text, THINKING_MAX_CHARS, snapshot.thinkingOmittedChars);
-			return { ...base, thinkingText: retained.text, thinkingOmittedChars: retained.omittedChars };
+			const combined = snapshot.thinkingText + event.text;
+			const newlyOmitted = Math.max(0, combined.length - THINKING_MAX_CHARS);
+			return {
+				...base,
+				thinkingText: newlyOmitted ? combined.slice(-THINKING_MAX_CHARS) : combined,
+				thinkingOmittedChars: snapshot.thinkingOmittedChars + newlyOmitted,
+			};
 		}
 		case "tool_start":
 			return {
@@ -631,26 +638,29 @@ export function retainDelegationSnapshot(snapshot: DelegationSnapshot): Delegati
 	const permissionDenials = snapshot.permissionDenials ?? [];
 	const diagnostics = snapshot.diagnostics ?? [];
 	const timeline = snapshot.timeline ?? [];
-	const toolsOmitted = Math.max(0, tools.length - RETAINED_LIST_MAX_ITEMS);
+	const toolsOmitted = Math.max(0, tools.length - TOOL_CALL_MAX_ITEMS);
+	const retainedTools = tools.slice(-TOOL_CALL_MAX_ITEMS);
+	const retainedToolIds = new Set(retainedTools.map((tool) => tool.id));
+	const retainedTimeline = timeline.filter((entry) => !entry.toolUseId || retainedToolIds.has(entry.toolUseId));
 	const denialsOmitted = Math.max(0, permissionDenials.length - RETAINED_LIST_MAX_ITEMS);
 	const diagnosticsOmitted = Math.max(0, diagnostics.length - RETAINED_LIST_MAX_ITEMS);
 	return {
 		...snapshot,
-		tools: tools.slice(-RETAINED_LIST_MAX_ITEMS),
+		tools: retainedTools,
 		toolsOmitted: (snapshot.toolsOmitted ?? 0) + toolsOmitted,
 		permissionDenials: permissionDenials.slice(-RETAINED_LIST_MAX_ITEMS),
 		permissionDenialsOmitted: (snapshot.permissionDenialsOmitted ?? 0) + denialsOmitted,
 		diagnostics: diagnostics.slice(-RETAINED_LIST_MAX_ITEMS),
 		diagnosticsOmitted: (snapshot.diagnosticsOmitted ?? 0) + diagnosticsOmitted,
-		timeline,
-		timelineOmitted: snapshot.timelineOmitted ?? 0,
+		timeline: retainedTimeline,
+		timelineOmitted: (snapshot.timelineOmitted ?? 0) + timeline.length - retainedTimeline.length,
 		responseText: retainTextWithOmissions(snapshot.responseText ?? "", MODEL_RESULT_MAX_CHARS, snapshot.responseOmittedChars ?? 0),
 		responseOmittedChars: 0,
 		resultText: snapshot.resultText === undefined
 			? undefined
 			: retainTextWithOmissions(snapshot.resultText, MODEL_RESULT_MAX_CHARS, snapshot.resultOmittedChars ?? 0),
 		resultOmittedChars: 0,
-		thinkingText: retainTextWithOmissions(snapshot.thinkingText ?? "", THINKING_MAX_CHARS, snapshot.thinkingOmittedChars ?? 0),
+		thinkingText: retainTailTextWithOmissions(snapshot.thinkingText ?? "", THINKING_MAX_CHARS, snapshot.thinkingOmittedChars ?? 0),
 		thinkingOmittedChars: 0,
 		error: snapshot.error ? retainText(snapshot.error, MODEL_RESULT_MAX_CHARS) : undefined,
 		retry: snapshot.retry ? { ...snapshot.retry, error: retainText(snapshot.retry.error, MODEL_RESULT_MAX_CHARS) } : undefined,
