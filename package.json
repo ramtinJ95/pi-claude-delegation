@@ -1,6 +1,6 @@
 {
   "name": "@ramtinj95/pi-claude-delegation",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": false,
   "description": "Pi extension providing Claude Code models and explicit foreground/background Claude delegation tools.",
   "keywords": [

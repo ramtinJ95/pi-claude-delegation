@@ -4,7 +4,7 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
-## UNRELEASED
+## 0.1.3 — 2026-08-26
 
 - **Refactor: retain the latest delegation activity** — DelegateToClaude and spawned-agent details now keep only the latest 10 tool calls and the latest 4,000 characters of emitted thinking, with explicit counts for omitted earlier activity.
 
