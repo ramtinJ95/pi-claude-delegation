@@ -9,6 +9,7 @@ import {
 	THINKING_MAX_CHARS,
 	TIMELINE_MAX_CHARS,
 	TIMELINE_MAX_EVENTS,
+	TOOL_CALL_MAX_ITEMS,
 	TOOL_FIELD_MAX_CHARS,
 	assembleModelResult,
 	redactSensitiveText,
@@ -21,8 +22,8 @@ import { createDelegationSnapshot, reduceDelegationEvent, retainDelegationSnapsh
 describe("delegation retention", () => {
 	it("pins each independently adjustable retention choice", () => {
 		assert.deepEqual(
-			{ MODEL_RESULT_MAX_CHARS, TOOL_FIELD_MAX_CHARS, TIMELINE_MAX_CHARS, TIMELINE_MAX_EVENTS, RETAINED_LIST_MAX_ITEMS, THINKING_MAX_CHARS, PROMPT_MAX_CHARS, ACTION_SUMMARY_MAX_CHARS, POLICY_ANNOTATION_MAX_CHARS },
-			{ MODEL_RESULT_MAX_CHARS: 16_000, TOOL_FIELD_MAX_CHARS: 2_000, TIMELINE_MAX_CHARS: 32_000, TIMELINE_MAX_EVENTS: 100, RETAINED_LIST_MAX_ITEMS: 100, THINKING_MAX_CHARS: 4_000, PROMPT_MAX_CHARS: 8_000, ACTION_SUMMARY_MAX_CHARS: 2_000, POLICY_ANNOTATION_MAX_CHARS: 1_000 },
+			{ MODEL_RESULT_MAX_CHARS, TOOL_FIELD_MAX_CHARS, TIMELINE_MAX_CHARS, TIMELINE_MAX_EVENTS, TOOL_CALL_MAX_ITEMS, RETAINED_LIST_MAX_ITEMS, THINKING_MAX_CHARS, PROMPT_MAX_CHARS, ACTION_SUMMARY_MAX_CHARS, POLICY_ANNOTATION_MAX_CHARS },
+			{ MODEL_RESULT_MAX_CHARS: 16_000, TOOL_FIELD_MAX_CHARS: 2_000, TIMELINE_MAX_CHARS: 32_000, TIMELINE_MAX_EVENTS: 100, TOOL_CALL_MAX_ITEMS: 10, RETAINED_LIST_MAX_ITEMS: 100, THINKING_MAX_CHARS: 4_000, PROMPT_MAX_CHARS: 8_000, ACTION_SUMMARY_MAX_CHARS: 2_000, POLICY_ANNOTATION_MAX_CHARS: 1_000 },
 		);
 	});
 
@@ -143,7 +144,7 @@ describe("delegation retention", () => {
 
 	it("caps retained state lists and records what was omitted", () => {
 		const snapshot = createDelegationSnapshot(0);
-		snapshot.tools = Array.from({ length: RETAINED_LIST_MAX_ITEMS + 3 }, (_, index) => ({
+		snapshot.tools = Array.from({ length: TOOL_CALL_MAX_ITEMS + 3 }, (_, index) => ({
 			id: `tool-${index}`, name: "Read", status: "succeeded", startedAt: index, updatedAt: index, parentToolUseId: null,
 		}));
 		snapshot.permissionDenials = Array.from({ length: RETAINED_LIST_MAX_ITEMS + 2 }, (_, index) => ({
@@ -152,14 +153,37 @@ describe("delegation retention", () => {
 		snapshot.diagnostics = Array.from({ length: RETAINED_LIST_MAX_ITEMS + 1 }, (_, index) => ({
 			kind: "unhandled_sdk_message", label: `frame-${index}`, at: index,
 		}));
+		snapshot.timeline = [
+			{ kind: "session", label: "started", at: 0 },
+			...snapshot.tools.map((tool) => ({ kind: "tool_start", label: tool.name, at: tool.startedAt, toolUseId: tool.id })),
+		];
 
 		const retained = retainDelegationSnapshot(snapshot);
-		assert.equal(retained.tools.length, RETAINED_LIST_MAX_ITEMS);
+		assert.equal(retained.tools.length, TOOL_CALL_MAX_ITEMS);
 		assert.equal(retained.toolsOmitted, 3);
+		assert.equal(retained.tools[0].id, "tool-3");
+		assert.deepEqual(retained.timeline.map((entry) => entry.toolUseId ?? entry.kind), ["session", ...retained.tools.map((tool) => tool.id)]);
+		assert.equal(retained.timelineOmitted, 3);
 		assert.equal(retained.permissionDenials.length, RETAINED_LIST_MAX_ITEMS);
 		assert.equal(retained.permissionDenialsOmitted, 2);
 		assert.equal(retained.diagnostics.length, RETAINED_LIST_MAX_ITEMS);
 		assert.equal(retained.diagnosticsOmitted, 1);
+	});
+
+	it("retains the latest thinking trace and marks the omitted prefix", () => {
+		let snapshot = createDelegationSnapshot(0);
+		snapshot = reduceDelegationEvent(snapshot, { type: "thinking_delta", at: 1, text: "OLD:" + "x".repeat(THINKING_MAX_CHARS) });
+		snapshot = reduceDelegationEvent(snapshot, { type: "thinking_delta", at: 2, text: "api_key=tailsecret LATEST" });
+
+		assert.equal(snapshot.thinkingText.endsWith("LATEST"), true);
+		assert.equal(snapshot.thinkingText.includes("OLD:"), false);
+		const retained = retainDelegationSnapshot(snapshot);
+		const omission = retained.thinkingText.match(/^\[… truncated (\d+) earlier chars\]\n/);
+		assert.equal(retained.thinkingText.length, THINKING_MAX_CHARS);
+		assert.equal(Number(omission?.[1]), 60);
+		assert.doesNotMatch(retained.thinkingText, /tailsecret/);
+		assert.match(retained.thinkingText, /api_key=\[REDACTED\]/);
+		assert.equal(retained.thinkingText.endsWith("LATEST"), true);
 	});
 
 	it("keeps visible text truncation within its field limit", () => {

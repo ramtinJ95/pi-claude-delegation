@@ -4,6 +4,10 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
+## UNRELEASED
+
+- **Refactor: retain the latest delegation activity** — DelegateToClaude and spawned-agent details now keep only the latest 10 tool calls and the latest 4,000 characters of emitted thinking, with explicit counts for omitted earlier activity.
+
 ## 0.1.2 — 2026-08-22
 
 - **Add: live delegated-context usage** — Track top-level Claude Code `message_start`/`message_delta` usage separately from cumulative run billing, show live context occupancy while the served window is pending, and add an authoritative context-window percentage once the terminal SDK result reports it. Nested-agent context remains excluded so the overlay and live widget do not mislabel subagent usage as the parent session.

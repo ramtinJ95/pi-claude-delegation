@@ -4,6 +4,7 @@ export const MODEL_RESULT_MAX_CHARS = 16_000;
 export const TOOL_FIELD_MAX_CHARS = 2_000;
 export const TIMELINE_MAX_CHARS = 32_000;
 export const TIMELINE_MAX_EVENTS = 100;
+export const TOOL_CALL_MAX_ITEMS = 10;
 export const RETAINED_LIST_MAX_ITEMS = 100;
 export const THINKING_MAX_CHARS = 4_000;
 export const PROMPT_MAX_CHARS = 8_000;
@@ -55,21 +56,7 @@ export function retainTextWithOmissions(
 	redact = true,
 ): string {
 	const retained = redact ? redactSensitiveText(text) : text;
-	if (retained.length <= maxChars && previouslyOmitted === 0) return retained;
-
-	let newlyOmitted = Math.max(0, retained.length - maxChars);
-	let marker = "";
-	// The marker itself consumes retained space, which increases the number of
-	// source characters omitted. Iterate until the digit width and slice agree.
-	for (let i = 0; i < 5; i++) {
-		marker = `\n[… truncated ${previouslyOmitted + newlyOmitted} chars]`;
-		const next = Math.max(0, retained.length - Math.max(0, maxChars - marker.length));
-		if (next === newlyOmitted) break;
-		newlyOmitted = next;
-	}
-	marker = `\n[… truncated ${previouslyOmitted + newlyOmitted} chars]`;
-	if (marker.length >= maxChars) return marker.slice(0, maxChars);
-	return retained.slice(0, maxChars - marker.length) + marker;
+	return fitRetainedText(retained, maxChars, previouslyOmitted, "start");
 }
 
 export function appendRetainedText(
@@ -86,6 +73,41 @@ export function appendRetainedText(
 		text: current + delta.slice(0, room),
 		omittedChars: previouslyOmitted + Math.max(0, delta.length - room),
 	};
+}
+
+/** Redact and fit the newest text, with a marker showing that earlier text was dropped. */
+export function retainTailTextWithOmissions(
+	text: string,
+	maxChars: number,
+	previouslyOmitted = 0,
+): string {
+	return fitRetainedText(redactSensitiveText(text), maxChars, previouslyOmitted, "end");
+}
+
+function fitRetainedText(
+	text: string,
+	maxChars: number,
+	previouslyOmitted: number,
+	keep: "start" | "end",
+): string {
+	if (text.length <= maxChars && previouslyOmitted === 0) return text;
+
+	const markerFor = (omittedChars: number) => keep === "start"
+		? `\n[… truncated ${omittedChars} chars]`
+		: `[… truncated ${omittedChars} earlier chars]\n`;
+	let newlyOmitted = Math.max(0, text.length - maxChars);
+	let marker = "";
+	// The marker consumes retained space; converge after its digit width stabilizes.
+	for (let i = 0; i < 5; i++) {
+		marker = markerFor(previouslyOmitted + newlyOmitted);
+		const next = Math.max(0, text.length - Math.max(0, maxChars - marker.length));
+		if (next === newlyOmitted) break;
+		newlyOmitted = next;
+	}
+	marker = markerFor(previouslyOmitted + newlyOmitted);
+	if (marker.length >= maxChars) return marker.slice(0, maxChars);
+	const room = maxChars - marker.length;
+	return keep === "start" ? text.slice(0, room) + marker : marker + text.slice(-room);
 }
 
 /** Redact and bound one tool/action summary before it reaches the model or the session. */
