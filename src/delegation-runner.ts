@@ -20,7 +20,7 @@ import {
 } from "./query-policy.js";
 
 export interface DelegationQuery extends AsyncIterable<SDKMessage> {
-	interrupt(): Promise<void>;
+	interrupt(): Promise<unknown>;
 	close(): void;
 }
 

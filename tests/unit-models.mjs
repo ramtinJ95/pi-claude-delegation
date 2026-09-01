@@ -5,7 +5,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { MODEL_IDS_IN_ORDER, applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel, resolveModel } from "../src/models.js";
+import { FABLE_MODEL_ID, MODEL_IDS_IN_ORDER, applyLongContext, buildModels, claudeCodeModelId, normalizeClaudeModelRequest, resolveClaudeCodeRuntimeModel, resolveModel } from "../src/models.js";
 
 const PRO = { plan: "pro", longContextExtraUsage: false };
 const MAX = { plan: "max", longContextExtraUsage: false };
@@ -45,6 +45,16 @@ describe("MODELS projection", () => {
 		// Only haiku present — opus/sonnet vanish from picker.
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
 		assert.deepEqual(models.map((m) => m.id), ["claude-haiku-4-5"]);
+	});
+
+	it("uses legacy catalog metadata for Fable 5.1 without exposing Fable 5", () => {
+		const models = buildModels([
+			mockPiAiModel("claude-fable-5"),
+			mockPiAiModel("claude-haiku-4-5"),
+		]);
+		assert.deepEqual(models.map((model) => model.id), [FABLE_MODEL_ID, "claude-haiku-4-5"]);
+		assert.equal(models[0].name, "claude-fable-5.1");
+		assert.equal(models.some((model) => model.id === "claude-fable-5"), false);
 	});
 
 	it("zeros out cost regardless of pi-ai pricing", () => {
@@ -105,6 +115,7 @@ describe("claudeCodeModelId", () => {
 	const models = buildModels(MODEL_IDS_IN_ORDER.map(oneM));
 
 	it("returns the measured SDK request id", () => {
+		assert.equal(claudeCodeModelId(find(models, FABLE_MODEL_ID), PRO), "claude-fable-5-1[1m]");
 		assert.equal(claudeCodeModelId(find(models, "claude-opus-5"), PRO), "claude-opus-5[1m]");
 		assert.equal(claudeCodeModelId(find(models, "claude-opus-4-8"), PRO), "claude-opus-4-8[1m]");
 		assert.equal(claudeCodeModelId(find(models, "claude-opus-4-7"), PRO), "claude-opus-4-7");
@@ -163,6 +174,17 @@ describe("resolveModel", () => {
 
 	it("opus shortcut resolves to claude-opus-5 (first opus in order)", () => {
 		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5");
+	});
+
+	it("resolves every Fable shortcut and stale ID to Fable 5.1", () => {
+		for (const input of ["fable", "claude-fable-5", "claude-fable-5[1m]", "claude-fable-5-1"]) {
+			assert.equal(resolveModel(models, input)?.id, FABLE_MODEL_ID);
+			assert.equal(normalizeClaudeModelRequest(input), FABLE_MODEL_ID);
+		}
+		assert.deepEqual(
+			resolveClaudeCodeRuntimeModel("claude-fable-5", PRO),
+			{ cliModelId: "claude-fable-5-1[1m]", contextWindow: 1000000 },
+		);
 	});
 
 	it("haiku shortcut resolves to claude-haiku-4-5", () => {

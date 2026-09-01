@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
-import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
+import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, normalizeClaudeModelRequest, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
@@ -193,7 +193,7 @@ const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-delegation:activeStreamSimpl
 // calling a hook with a made-up payload or response would be worse than an
 // honest compatibility limitation. See docs/PI-084-COMPATIBILITY.md.
 const PROVIDER_HOOK_SUPPORT = Object.freeze({
-	reviewedAgentSdk: "0.2.141",
+	reviewedAgentSdk: "0.3.257",
 	onPayload: false,
 	onResponse: false,
 });
@@ -1927,7 +1927,7 @@ async function runAskClaudeDelegation(
 	const cwd = options?.cwd ?? process.cwd();
 	const requestedModel = options?.model ?? ASK_CLAUDE_DEFAULT_MODEL;
 	const model = resolveModel(requestedModel);
-	const modelId = model?.id ?? requestedModel;
+	const modelId = model?.id ?? normalizeClaudeModelRequest(requestedModel);
 	const cliModel = model ? claudeCodeModelId(model, longContextSettings) : modelId;
 
 	const isolated = options?.isolated ?? true;
@@ -2230,7 +2230,9 @@ function runBackgroundJobDelegation(input: {
 	permissionMode?: PermissionMode;
 }): Promise<DelegationRunResult> {
 	const model = resolveModel(input.requestedModel);
-	const cliModel = model ? claudeCodeModelId(model, longContextSettings) : input.requestedModel;
+	const cliModel = model
+		? claudeCodeModelId(model, longContextSettings)
+		: normalizeClaudeModelRequest(input.requestedModel);
 	const policy = resolveDelegationPolicy(input.profile.capabilityMode, { permissionMode: input.permissionMode });
 	const effort = input.thinking && input.thinking !== "off"
 		? REASONING_TO_EFFORT[input.thinking] : undefined;
