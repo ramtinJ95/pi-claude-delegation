@@ -4,6 +4,13 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
+## UNRELEASED
+
+- **Fix: query completion and prompt cleanup** — Require an authoritative result before accepting isolated compaction/branch summaries, reuse the delegation EOF invariant, avoid launching already-cancelled summaries, and reject queued prompt acknowledgements when their consumer closes.
+- **Fix: bounded, cancellable reviewer capture** — Stream bounded Git output under a shared 30-second capture deadline, forward launch cancellation, distinguish subprocess failures from normal diff exit codes, and continue validating omitted files without retaining their output. Oversized Git metadata fails visibly rather than silently skipping files.
+- **Refactor: coalesced delegation progress** — Share 100ms latest-value publication across foreground and background calls, flush pending background activity before settlement, and preserve unchanged manager-record identities so overlay Markdown caches survive unrelated updates.
+- **Refactor: explicit delegation ownership** — Extract shared-session synchronization, isolated summaries, foreground execution, spawn registration, and result formatting from the entry point; consolidate query-input assembly and permission annotations while preserving provider/delegation separation and foreground/background session semantics.
+
 ## 0.1.4 — 2026-09-01
 
 - **Bump: require Claude Fable 5.1** — Upgrade the Claude Agent SDK from 0.2.141 to 0.3.257 so `DelegateToClaude` and `SpawnClaudeAgent` use a Claude Code runtime new enough to launch `claude-fable-5-1`. Replace Fable 5 in the provider catalog, make the `fable` shortcut select Fable 5.1, and force stale `claude-fable-5` requests onto 5.1 so this package can no longer invoke Fable 5.

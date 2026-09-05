@@ -122,9 +122,11 @@ describe("Claude query permission policy", () => {
 			.join("\n");
 		const indexSource = readFileSync(new URL("index.ts", srcDir), "utf8");
 		const delegationOptions = readFileSync(new URL("delegation-options.ts", srcDir), "utf8");
-		const compaction = topLevelFunctionSource(indexSource, "runIsolatedSummary");
+		const compaction = topLevelFunctionSource(indexSource, "summaryQueryOptions");
 		const provider = topLevelFunctionSource(indexSource, "streamClaudeAgentSdk");
 		const delegation = topLevelFunctionSource(indexSource, "runAskClaudeDelegation");
+		const delegationInputs = topLevelFunctionSource(indexSource, "delegationQueryInputs");
+		const background = topLevelFunctionSource(indexSource, "runBackgroundJobDelegation");
 
 		assert.doesNotMatch(allSource, /permissionMode:\s*["'][^"']+["']/,
 			"an extension query path hard-codes a permission mode");
@@ -141,8 +143,11 @@ describe("Claude query permission policy", () => {
 			"provider does not apply resolved permission policy");
 		assert.match(delegation, /buildDelegationQueryOptions\(/,
 			"delegation does not use the pure options boundary");
-		assert.match(delegation, /resolveDelegationPolicy\(mode,/,
+		assert.match(delegationInputs, /resolveDelegationPolicy\(input\.mode,/,
 			"delegation does not resolve capability and permission policy");
+		assert.match(delegation, /delegationQueryInputs\(/);
+		assert.match(background, /delegationQueryInputs\(/);
+		assert.match(background, /buildDelegationQueryOptions\(/);
 		assert.match(delegationOptions, /const policy = input\.policy/,
 			"delegation options do not consume the already-resolved policy");
 		assert.match(delegationOptions, /permissionMode:\s*policy\.permissionMode/,

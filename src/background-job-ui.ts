@@ -1,3 +1,4 @@
+import { permissionAnnotations } from "./delegation-output.js";
 // Background job UI adapter: the Phase 3b presentation and delivery layer for
 // SpawnClaudeAgent jobs.
 //
@@ -404,19 +405,11 @@ export function buildCompletionMessageText(record: BackgroundJobRecord): string 
 			break;
 	}
 
-	const annotations: string[] = [];
-	if (record.permission?.overridden) {
-		const policyLabels = managedPolicyLabels(record.managedPolicy);
-		annotations.push(`[Claude Code permission mode: requested ${record.permission.requested}, runtime ${record.permission.effective}${policyLabels.length ? `; observed managed policy: ${policyLabels.join(", ")}` : "; Claude settings or managed policy may have overridden it"}.]`);
-	}
-	const denials = snapshot?.permissionDenials ?? [];
-	if (denials.length) {
-		const denied = denials
-			.slice(0, 5)
-			.map((item) => `${item.toolName}${item.reasonType ? ` (${item.reasonType})` : ""}`)
-			.join(", ");
-		annotations.push(`[Claude Code permission denials: ${denied}${denials.length > 5 ? ", …" : ""}.]`);
-	}
+	const annotations = permissionAnnotations({
+		permission: record.permission,
+		managedPolicy: record.managedPolicy,
+		permissionDenials: snapshot?.permissionDenials ?? [],
+	});
 	const actions = snapshot ? buildSnapshotActionSummary(snapshot) : "";
 
 	return assembleModelResult({

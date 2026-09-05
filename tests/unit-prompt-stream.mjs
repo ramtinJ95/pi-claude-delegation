@@ -22,6 +22,25 @@ function pump(stream, write) {
 }
 
 describe("makePromptStream", () => {
+	it("rejects every queued acknowledgement when the consumer closes", async () => {
+		const ps = makePromptStream();
+		const acks = ["first", "second", "third"].map((value) =>
+			assert.rejects(ps.push(userMessage(value)), /closed/));
+		await ps.stream.next();
+		await ps.stream.return();
+		await Promise.all(acks);
+	});
+
+	it("end still drains messages queued before closure", async () => {
+		const ps = makePromptStream();
+		const acks = ["one", "two"].map((value) => ps.push(userMessage(value)));
+		ps.end();
+		const written = [];
+		await pump(ps.stream, (msg) => written.push(msg.message.content));
+		await Promise.all(acks);
+		assert.deepEqual(written, ["one", "two"]);
+	});
+
 	it("resolves the ack only after the write completes", async () => {
 		const ps = makePromptStream();
 		const written = [];

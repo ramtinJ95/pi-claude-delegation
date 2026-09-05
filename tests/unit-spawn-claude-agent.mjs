@@ -2,9 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { BackgroundJobManager } from "../src/background-jobs.js";
 import { CheckoutWriteLease } from "../src/checkout-write-lease.js";
-import { __test } from "../src/index.js";
+import { registerSpawnClaudeAgent } from "../src/spawn-claude-agent.js";
 
-const { registerSpawnClaudeAgent } = __test;
 
 /** Minimal Pi extension API double: records registrations, replays events. */
 function fakePi() {
@@ -143,7 +142,10 @@ describe("SpawnClaudeAgent adapter wiring", () => {
 			thinking: "high",
 		});
 
-		assert.deepEqual(captures, [{ cwd: "/repo", base: "main", capturedAt: 42 }]);
+		assert.equal(captures.length, 1);
+		assert.ok(captures[0].signal instanceof AbortSignal);
+		const { signal: _signal, ...facts } = captures[0];
+		assert.deepEqual(facts, { cwd: "/repo", base: "main", capturedAt: 42 });
 		assert.equal(result.details.diffSource, DIFF_ARTIFACT.source);
 		assert.equal(result.details.diffArtifactTruncated, false);
 		assert.equal(runs.length, 1);
@@ -213,6 +215,7 @@ describe("SpawnClaudeAgent adapter wiring", () => {
 		const controller = new AbortController();
 		const { pi, jobs, runs } = wire({
 			captureDiff: async (input) => {
+				assert.equal(input.signal, controller.signal);
 				controller.abort(); // cancellation lands while the capture is awaited
 				return { ...DIFF_ARTIFACT, cwd: input.cwd, capturedAt: input.capturedAt };
 			},
@@ -454,7 +457,10 @@ describe("SpawnClaudeAgent execution dispatch", () => {
 			{ task: "review it", mode: "read", review: { base: "main" }, execution: "foreground" },
 			{ ctx: foregroundCtx() },
 		);
-		assert.deepEqual(captures, [{ cwd: "/repo", base: "main", capturedAt: 42 }]);
+		assert.equal(captures.length, 1);
+		assert.ok(captures[0].signal instanceof AbortSignal);
+		const { signal: _signal, ...facts } = captures[0];
+		assert.deepEqual(facts, { cwd: "/repo", base: "main", capturedAt: 42 });
 		assert.ok(foregroundRuns[0].prompt.includes("+changed line"));
 
 		const failing = wire({

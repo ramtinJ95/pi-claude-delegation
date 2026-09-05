@@ -10,7 +10,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 const { __test } = await import("../src/index.js");
-const { finalizeAskClaudeResult, askClaudeResultIsError } = __test;
+const { askClaudeResultIsError } = __test;
+const { finalizeAskClaudeResult } = await import("../src/delegation-output.js");
 const { createDelegationSnapshot } = await import("../src/delegation-events.js");
 const { MODEL_RESULT_MAX_CHARS } = await import("../src/delegation-retention.js");
 
