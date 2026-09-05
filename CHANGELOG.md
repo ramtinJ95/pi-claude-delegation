@@ -4,7 +4,7 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
-## UNRELEASED
+## 0.1.5 — 2026-09-05
 
 - **Fix: query completion and prompt cleanup** — Require an authoritative result before accepting isolated compaction/branch summaries, reuse the delegation EOF invariant, avoid launching already-cancelled summaries, and reject queued prompt acknowledgements when their consumer closes.
 - **Fix: bounded, cancellable reviewer capture** — Stream bounded Git output under a shared 30-second capture deadline, forward launch cancellation, distinguish subprocess failures from normal diff exit codes, and continue validating omitted files without retaining their output. Oversized Git metadata fails visibly rather than silently skipping files.
