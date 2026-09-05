@@ -1,16 +1,20 @@
+import { createSharedSessionSynchronizer, turnStart, type SessionState } from "./shared-session.js";
+import { createIsolatedSummaryStreamFn } from "./isolated-summary.js";
+import { createForegroundDelegationExecutor, type ForegroundRunOptions } from "./foreground-delegation.js";
+import { registerSpawnClaudeAgent, spawnClaudeAgentToolName } from "./spawn-claude-agent.js";
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, compact, generateBranchSummary, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, resolveSettings, type EffortLevel, type PermissionMode, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
+import { deleteSession } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
-import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
+import { PROVIDER_ID, messageContentToText } from "./convert.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, normalizeClaudeModelRequest, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
@@ -23,32 +27,28 @@ import {
 	projectPromptCapture,
 	PromptCaptures,
 } from "./prompt-capture.js";
-import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { askClaudeContextTags, buildAskClaudeContract } from "./askclaude-contract.js";
-import { clearLiveAskClaudeCall, registerClaudeSessionsUI, updateLiveAskClaudeCall, type ClaudeSessionsUIHandle } from "./claude-sessions-overlay.js";
+import { clearLiveAskClaudeCall, registerClaudeSessionsUI, type ClaudeSessionsUIHandle } from "./claude-sessions-overlay.js";
 import {
-	buildAskClaudePartialUpdate,
-	buildSnapshotActionSummary,
 	renderAskClaudeResult,
-	retainAskClaudePrompt,
+	PREVIEW_MAX_CHARS,
+	PREVIEW_MAX_LINES,
 	type AskClaudeResultDetails,
 } from "./askclaude-ui.js";
 import { assembleModelResult } from "./delegation-retention.js";
-import { buildDelegationQueryOptions } from "./delegation-options.js";
-import { runDelegation, type DelegationQueryFactory, type DelegationRunResult } from "./delegation-runner.js";
-import { AGENT_PROFILES, agentCapabilityMode, buildAgentJobPrompt, resolveAgentProfile, type AgentProfile, type AgentProfileId } from "./agent-profiles.js";
-import { BackgroundJobLimitError, BackgroundJobManager, type BackgroundJobLaunch, type BackgroundJobRecord } from "./background-jobs.js";
+import { ASK_CLAUDE_DEFAULT_MODEL, buildDelegationQueryOptions } from "./delegation-options.js";
+import { runDelegation, type DelegationRunResult } from "./delegation-runner.js";
+import type { AgentProfile } from "./agent-profiles.js";
+import { BackgroundJobManager } from "./background-jobs.js";
 import { registerBackgroundJobUI } from "./background-job-ui.js";
-import { captureReviewerDiff, type ReviewerDiffArtifact } from "./reviewer-diff.js";
+import { captureReviewerDiff } from "./reviewer-diff.js";
 import {
-	CheckoutWriteLease,
 	checkoutWriteConflictText,
 	globalCheckoutWriteLease,
-	type CheckoutWriteLeaseHandle,
 } from "./checkout-write-lease.js";
 import {
-	retainDelegationSnapshot,
+	errorMessage,
 	sdkResultErrorText as resultErrorText,
 	type DelegationSnapshot,
 } from "./delegation-events.js";
@@ -223,121 +223,9 @@ function resolveModel(input: string) {
 	return _resolveModel(MODELS, input);
 }
 
-// --- Error handling ---
-
-function errorMessage(err: unknown): string {
-	if (err instanceof Error) return err.message;
-	if (err && typeof err === "object") {
-		const obj = err as Record<string, unknown>;
-		if (typeof obj.message === "string") return obj.message;
-		if (typeof obj.error === "string") return obj.error;
-		try { return JSON.stringify(err); } catch {}
-	}
-	return String(err);
-}
-
-// --- Session persistence ---
-
-interface SessionState {
-	sessionId: string;
-	cursor: number;
-	cwd: string;
-	// Force the next syncSharedSession call down the REBUILD path. Set when
-	// pi has mutated its messages array out from under us (compact, tree
-	// navigation) or after an abort left the JSONL in an indeterminate state.
-	// REBUILD wipes and rewrites the file to match pi's current history.
-	needsRebuild?: boolean;
-	// Set ONLY after an abort. The killed CC subprocess may still be flushing
-	// a late "[Request interrupted by user]" record to the session JSONL.
-	// Reusing the same sessionId/path would race that orphan write into our
-	// fresh file and break CC's parent-uuid chain on the next resume. When
-	// this flag is set, REBUILD takes a fresh UUID and skips deleteSession
-	// so the orphan writes land on a dead inode. Compact/tree do NOT set
-	// this — there's no concurrent CC writer during those events, so
-	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
-	forceRotate?: boolean;
-}
-
-/**
- * Claude Code's `@file` expansions from the session about to be replaced.
- *
- * Must be called before `deleteSession`, which wipes the file they live in —
- * reading after it yields nothing, with no error to notice.
- */
-function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachment[] {
-	try {
-		const previous = openSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR });
-		return collectCarriedAttachments(previous.records);
-	} catch (error) {
-		// A post-abort rebuild reads a file the killed CC subprocess may have been
-		// midway through writing, and cc-session-io parses each line with a bare
-		// JSON.parse, so a truncated last line throws. Throwing here would turn a
-		// lost attachment into a failed turn; carrying none is exactly what happened
-		// before this existed, so the failure mode is bounded by the status quo.
-		debug(`WARNING: could not read attachments from session ${sessionId.slice(0, 8)}:`, error);
-		return [];
-	}
-}
-
-let sharedSession: SessionState | null = null;
-
-// Convert pi messages to Anthropic API format for session import.
-// Lossy: only text, thinking and toolCall blocks survive, and thinking only when
-// Claude Code itself minted the signature. An assistant message whose blocks all
-// filter out keeps its slot with a placeholder, since dropping it can create a
-// tool_result with no preceding tool_use. A turn aborted before anything streamed
-// is dropped instead — it never had content, and inventing one diverges from the
-// prefix Claude Code cached.
-function convertAndImportMessages(
-	session: ReturnType<typeof createSession>,
-	messages: Context["messages"],
-	customToolNameToSdk?: Map<string, string>,
-	carried?: readonly CarriedAttachment[],
-): void {
-	const { anthropicMessages, sanitizedIds, dropped } = convertPiMessages(messages, customToolNameToSdk);
-
-	debug(`convertAndImportMessages: ${messages.length} pi msgs → ${anthropicMessages.length} anthropic msgs`);
-	debug(`convertAndImportMessages: imported roles:`, anthropicMessages.map((m, i) => {
-		const c = m.content;
-		if (typeof c === "string") return `[${i}]${m.role}:text`;
-		if (Array.isArray(c)) return `[${i}]${m.role}:${(c).map((b) => b.type).join("+")}`;
-		return `[${i}]${m.role}:?`;
-	}).join(" "));
-	// The roles line above shows only what survived, so a stripped block is
-	// indistinguishable there from one that never existed. Name the losses.
-	const droppedParts = [
-		dropped.thinking ? `${dropped.thinking} thinking (${[...dropped.providers].sort().join(", ")})` : "",
-		dropped.abortedTurns ? `${dropped.abortedTurns} aborted turn(s)` : "",
-		...[...dropped.other].map(([type, n]) => `${n} ${type}`),
-	].filter(Boolean);
-	if (droppedParts.length > 0) {
-		debug(`convertAndImportMessages: dropped ${droppedParts.join(", ")}`);
-	}
-	if (sanitizedIds.size > 0) {
-		debug(`convertAndImportMessages: sanitized ${sanitizedIds.size} tool IDs:`,
-			[...sanitizedIds.entries()].map(([orig, clean]) => orig === clean ? orig : `${orig}→${clean}`).join(", "));
-	}
-	// Pre-repair for debug logging; importMessages also repairs internally (idempotent).
-	const repaired = repairToolPairing(anthropicMessages);
-	if (repaired.length !== anthropicMessages.length) {
-		debug(`convertAndImportMessages: repairToolPairing ${anthropicMessages.length} → ${repaired.length} msgs`);
-	}
-	// Placement runs against the repaired array because that is the index space
-	// importMessages reads. Attachments are links in CC's uuid chain, so they have
-	// to be written in order with the messages, not appended afterwards.
-	const placed = carried?.length
-		? placeCarriedAttachments(carried, repaired as unknown as { role: string; content: unknown }[])
-		: undefined;
-	if (placed?.skipped.length) {
-		debug(`convertAndImportMessages: dropped ${placed.skipped.length} carried attachment(s): ${placed.skipped.join("; ")}`);
-	}
-	if (placed?.attachments.length) {
-		debug(`convertAndImportMessages: carrying ${placed.attachments.length} attachment(s) across the rebuild`);
-	}
-	if (repaired.length) {
-		session.importMessages(repaired, placed?.attachments.length ? { attachments: placed.attachments } : undefined);
-	}
-}
+// Session synchronization owns the mutable cursor and rebuild flags.
+const sessionSync = createSharedSessionSynchronizer({ debug, verifyWrittenSession, debugSessionPaths });
+const syncSharedSession = sessionSync.sync;
 
 // Pi doesn't pass tool results directly — it appends them to the context and calls
 // the provider again. Thin wrapper over extract-tool-results.js that adds per-turn
@@ -361,13 +249,6 @@ function extractAllToolResults(context: Context): McpResult[] {
  *  prompt. Deriving both halves from one index is what keeps a message from
  *  landing in both — an extension appending a display-only user message after
  *  the real one (see issue #34) makes the turn longer than one message. */
-function turnStart(messages: Context["messages"]): number {
-	let i = messages.length;
-	while (i > 0 && messages[i - 1].role === "user") i--;
-	return i;
-}
-
-/** Extract the current user turn as a prompt string. Returns null if the last message is not a user message. */
 function extractUserPrompt(messages: Context["messages"]): string | null {
 	const turn = messages.slice(turnStart(messages)) as UserMessage[];
 	if (turn.length === 0) return null;
@@ -427,142 +308,40 @@ function extractUserPromptBlocks(messages: Context["messages"]): ContentBlockPar
 	return hasImage ? blocks : null;
 }
 
-function newAssistantOutput(model: Model<any>, text: string, stopReason: AssistantMessage["stopReason"], errorMessage?: string): AssistantMessage {
+const isolatedStreamFn = createIsolatedSummaryStreamFn({
+	createStream: newAssistantMessageEventStream,
+	debug,
+	onResult: (message, model) => logServedContextWindow("compact summary", message, model),
+	resolveOptions: summaryQueryOptions,
+});
+
+function summaryQueryOptions(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
+	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const compactProviderSettings = loadConfig(cwd).provider;
+	const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
+	const permissionPolicy = resolveProviderPermissionPolicy(compactProviderSettings);
+	const cliModel = claudeCodeModelId(model, longContextSettings);
+	debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id}`);
+
 	return {
-		role: "assistant",
-		content: text ? [{ type: "text", text }] : [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-		stopReason,
-		...(errorMessage ? { errorMessage } : {}),
-		timestamp: Date.now(),
+		cwd,
+		env: { ...process.env, ...CC_CHILD_ENV },
+		permissionMode: permissionPolicy.permissionMode,
+		...(permissionPolicy.allowDangerouslySkipPermissions
+			? { allowDangerouslySkipPermissions: true }
+			: {}),
+		settings: { autoMemoryEnabled: false },
+		tools: [],
+		strictMcpConfig: true,
+		settingSources: [] as SettingSource[],
+		skills: [],
+		persistSession: false,
+		systemPrompt: context.systemPrompt,
+		model: cliModel,
+		maxTurns: 1,
+		...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
+		...makeCliDebugOptions("compact-summary"),
 	};
-}
-
-function extractIsolatedSummaryPrompt(messages: Context["messages"]): string {
-	if (messages.length !== 1 || messages[0].role !== "user") {
-		throw new Error(
-			`isolatedStreamFn: expected exactly 1 user message, got ${messages.length} ` +
-			`(${messages.map((m) => m.role).join(",")})`,
-		);
-	}
-	const promptText = extractUserPrompt(messages);
-	if (!promptText) throw new Error("isolatedStreamFn: summarization prompt is empty");
-	return promptText;
-}
-
-function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	const stream = newAssistantMessageEventStream();
-	void runIsolatedSummary(model, context, options, stream);
-	return stream;
-}
-
-async function runIsolatedSummary(
-	model: Model<any>,
-	context: Context,
-	options: SimpleStreamOptions | undefined,
-	stream: AssistantMessageEventStream,
-): Promise<void> {
-	let sdkQuery: ReturnType<typeof query> | undefined;
-	let wasAborted = false;
-	const onAbort = () => {
-		wasAborted = true;
-		void sdkQuery?.interrupt().catch(() => {});
-		try { sdkQuery?.close(); } catch {}
-	};
-
-	try {
-		const promptText = extractIsolatedSummaryPrompt(context.messages);
-		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-		const compactProviderSettings = loadConfig(cwd).provider;
-		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
-		const permissionPolicy = resolveProviderPermissionPolicy(compactProviderSettings);
-		const cliModel = claudeCodeModelId(model, longContextSettings);
-		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
-
-		sdkQuery = query({
-			prompt: promptText,
-			options: {
-				cwd,
-				env: { ...process.env, ...CC_CHILD_ENV },
-				permissionMode: permissionPolicy.permissionMode,
-				...(permissionPolicy.allowDangerouslySkipPermissions
-					? { allowDangerouslySkipPermissions: true }
-					: {}),
-				settings: { autoMemoryEnabled: false },
-				tools: [],
-				strictMcpConfig: true,
-				settingSources: [] as SettingSource[],
-				skills: [],
-				persistSession: false,
-				systemPrompt: context.systemPrompt,
-				model: cliModel,
-				maxTurns: 1,
-				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
-				...makeCliDebugOptions("compact-summary"),
-			},
-		});
-
-		if (options?.signal) {
-			if (options.signal.aborted) onAbort();
-			else options.signal.addEventListener("abort", onAbort, { once: true });
-		}
-
-		let assistantText = "";
-		let finalText = "";
-		let errorText: string | undefined;
-		let firstEventLogged = false;
-
-		for await (const message of sdkQuery) {
-			if (!firstEventLogged) {
-				debug(`compact summary: first event type=${message.type}`);
-				firstEventLogged = true;
-			}
-			if (wasAborted) break;
-
-			if (message.type === "assistant") {
-				for (const block of (message as any).message?.content ?? []) {
-					if (block.type === "text" && typeof block.text === "string") assistantText += block.text;
-				}
-			} else if (message.type === "result") {
-				logServedContextWindow("compact summary", message, model);
-				errorText = resultErrorText(message);
-				if (!errorText && message.subtype === "success") finalText = message.result || assistantText;
-			}
-		}
-
-		if (wasAborted) {
-			const output = newAssistantOutput(model, "", "aborted", "Operation aborted");
-			debug("compact summary: aborted");
-			stream.push({ type: "error", reason: "aborted", error: output });
-			stream.end();
-			return;
-		}
-
-		const text = finalText || assistantText;
-		if (errorText || !text.trim()) {
-			const msg = errorText ?? "Claude Code summary returned empty text";
-			debug(`compact summary: error ${msg}`);
-			stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
-			stream.end();
-			return;
-		}
-
-		debug(`compact summary: done textLen=${text.length}`);
-		stream.push({ type: "done", reason: "stop", message: newAssistantOutput(model, text, "stop") });
-		stream.end();
-	} catch (err) {
-		const msg = errorMessage(err);
-		debug("runIsolatedSummary threw; pushing terminal error", err);
-		stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
-		stream.end();
-	} finally {
-		options?.signal?.removeEventListener("abort", onAbort);
-		try { sdkQuery?.close(); } catch {}
-	}
 }
 
 function reinjectPriorCompactionFileOps(branchEntries: Array<{ type: string; details?: unknown }>, preparation: { fileOps: { read: Set<string>; edited: Set<string> } }): void {
@@ -576,15 +355,6 @@ function reinjectPriorCompactionFileOps(branchEntries: Array<{ type: string; det
 	debug(`compact takeover: re-injected prior file ops read=${details.readFiles.length} modified=${details.modifiedFiles.length}`);
 }
 
-interface SyncResult {
-	sessionId: string | null;
-	preserveSharedSession?: boolean;
-}
-
-/**
- * Ensure the shared session has all messages up to (but not including) the last user message.
- * Returns session ID to resume from, or null if no resume needed.
- */
 // Read the session file we just wrote and sanity-check it. Warns instead of
 // throwing — CC may be more tolerant than our checks, so a false positive
 // shouldn't block the user. Pure logic is in session-verify.js; this wrapper
@@ -632,133 +402,18 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	debug(`${label}: env.CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR ?? "(unset)"} HOME=${process.env.HOME ?? "(unset)"}`);
 }
 
-// Two semantic paths:
-//   REUSE — pi's history is in sync with the existing sharedSession (or drifted
-//     only by the trailing final-assistant message that pi appends after
-//     streamSimple returns, which CC's own persisted session already has).
-//     Returns the existing sessionId. Keeps CC's prompt cache warm.
-//   REBUILD — no session yet, or pi's history has diverged (non-trailing
-//     missed messages, e.g. another provider took a turn). Wipes the existing
-//     session file (if any) and writes a fresh one containing all prior
-//     messages, reusing the same sessionId across rebuilds so UUIDs stay
-//     stable for the lifetime of pi's session.
-//
-// Why a full rebuild rather than patching:
-//   Injecting deltas into an existing session creates a branch that CC's
-//   --resume doesn't follow (documented attempt prior to this). A complete
-//   overwrite at the same path is simpler and correct.
-//
-// Why reuse the sessionId across rebuilds:
-//   CC re-reads the JSONL on every --resume call — no in-process UUID
-//   caching. Validated in tests/exp-session-clear.mjs, including the case
-//   where CC had appended its own tool_use/tool_result records between
-//   rebuilds. Preserving the UUID means stable log correlation across
-//   provider switches and no orphaned session files.
-//
-// Log strings still say "Case 1/2/3/4" so existing diagnostics (int-cache.sh,
-// int-session-resume.mjs) keep grepping the same anchors.
-function syncSharedSession(
-	messages: Context["messages"],
-	cwd: string,
-	customToolNameToSdk?: Map<string, string>,
-	modelId?: string,
-): SyncResult {
-	const priorMessages = messages.slice(0, turnStart(messages)); // everything before the current user turn
-
-	// REUSE path
-	//
-	// Guard on priorMessages.length >= cursor: a shorter incoming context cannot
-	// be a continuation of the cached session. This is the general invariant for
-	// pi-side history rewrites such as /compact and session_tree: without it,
-	// missed = [].slice(cursor) can falsely hit REUSE and resume an unrelated
-	// longer CC session. See issue #25.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length >= sharedSession.cursor) {
-		const missed = priorMessages.slice(sharedSession.cursor);
-		const trailingAssistantOnly =
-			missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
-		if (missed.length === 0 || trailingAssistantOnly) {
-			if (trailingAssistantOnly) {
-				sharedSession = { ...sharedSession, cursor: priorMessages.length, cwd };
-			}
-			debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-			debug(`syncResult: path=reuse sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
-			return { sessionId: sharedSession.sessionId };
-		}
-	}
-	// This is what keeps a reentrant subagent from taking over the parent's
-	// session: a subagent starts with priors of its own, shorter than the parent's
-	// cursor, so it lands here, gets a fresh session, and the ephemeral session it
-	// captures is deleted once its query completes (see preserveSharedSession in
-	// the completion handler). Remove this branch and a subagent resumes — then
-	// overwrites — the parent's session. The non-isolated DelegateToClaude path reaches it
-	// the same way.
-	//
-	// It is NOT, despite an earlier comment here, the isolated compact-summary
-	// path: runIsolatedSummary never calls syncSharedSession at all.
-	//
-	// Only reachable when needsRebuild is false — user-facing history rewrites
-	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
-		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
-		return { sessionId: null, preserveSharedSession: true };
-	}
-
-	// REBUILD path
-	if (priorMessages.length === 0) {
-		debug(`Case 1: clean start, ${messages.length} total messages`);
-		debug(`syncResult: path=clean-start`);
-		return { sessionId: null };
-	}
-	const previousSessionId = sharedSession?.sessionId;
-	const previousCursor = sharedSession?.cursor ?? 0;
-	// preserveId: rebuild in place (deleteSession + createSession with the
-	// existing UUID), so prompt-cache UUIDs stay stable for log correlation
-	// and for any tools that key off them. Skipped only when there's a
-	// concurrent writer we shouldn't race — see forceRotate docs above.
-	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
-	// Before deleteSession — it wipes the file these live in.
-	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
-	if (preserveId) {
-		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
-		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
-	}
-	const session = createSession({
-		projectPath: cwd,
-		claudeDir: process.env.CLAUDE_CONFIG_DIR,
-		...(preserveId ? { sessionId: previousSessionId } : {}),
-		...(modelId ? { model: modelId } : {}),
-	});
-	convertAndImportMessages(session, priorMessages, customToolNameToSdk, carried);
-	session.save();
-	// records, not messages: `messages` filters out the attachment records that
-	// carrying an `@file` expansion across a rebuild writes into the same file.
-	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
-	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
-	if (previousSessionId === undefined) {
-		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.records.length} records`);
-	} else if (preserveId) {
-		const missedCount = priorMessages.length - previousCursor;
-		debug(`Case 4: ${missedCount} missed messages, ${priorMessages.length} total → rewrote session ${session.sessionId.slice(0, 8)} (same id), ${session.records.length} records`);
-	} else {
-		debug(`Case 4 post-abort: ${priorMessages.length} total → new session ${session.sessionId.slice(0, 8)} (was ${previousSessionId.slice(0, 8)}, rotated to avoid race with orphan writer), ${session.records.length} records`);
-	}
-	debugSessionPaths(`${session.sessionId.slice(0, 8)}`, cwd, session.jsonlPath);
-	debug(`syncResult: path=rebuild sessionId=${session.sessionId} priors=${priorMessages.length} ${previousSessionId === undefined ? "first" : preserveId ? "preserved" : "rotated-post-abort"}`);
-	return { sessionId: session.sessionId };
-}
+const executeForegroundDelegation = createForegroundDelegationExecutor(runAskClaudeDelegation, debug);
 
 // @internal
 export const __test = {
 	resetSharedSession() {
-		sharedSession = null;
+		sessionSync.clear();
 	},
 	setSharedSession(state: SessionState | null) {
-		sharedSession = state;
+		sessionSync.restore(state);
 	},
 	getSharedSession() {
-		return sharedSession;
+		return sessionSync.current;
 	},
 	setPiUI(ui: ExtensionUIContext | null) {
 		piUI = ui;
@@ -774,11 +429,7 @@ export const __test = {
 	buildMcpServers,
 	branchSummaryOutcome,
 	PROVIDER_HOOK_SUPPORT,
-	finalizeAskClaudeResult,
 	askClaudeResultIsError,
-	spawnClaudeAgentResultIsError,
-	spawnedJobResultText,
-	registerSpawnClaudeAgent,
 	executeForegroundDelegation,
 };
 
@@ -798,86 +449,6 @@ function askClaudeResultIsError(
 ): { isError: true } | undefined {
 	if (event.toolName !== askClaudeToolName || event.isError) return undefined;
 	return (event.details as AskClaudeResultDetails | undefined)?.error ? { isError: true } : undefined;
-}
-
-/**
- * Shape one finished delegation into the model-facing result and TUI details.
- *
- * A cancelled run resolves normally in the runner so partial work survives, so
- * this is the only place that can stop it reading as a successful empty answer:
- * the model is told it was cancelled, whatever response and actions did arrive
- * are kept, and the `cancelled`/`error` details keep the renderer — and
- * `askClaudeResultIsError` — from claiming success.
- *
- * The action summary is derived here from the retained snapshot rather than
- * accepted from the caller, so the model-facing summary, the persisted details,
- * and the rendered tool list all describe the same bounded record.
- */
-function finalizeAskClaudeResult(input: {
-	result: DelegationRunResult;
-	prompt: string;
-	executionTime: number;
-	capabilityMode?: "full" | "read" | "none";
-	requestedModel?: string;
-	thinking?: string;
-	isolated?: boolean;
-}): { content: { type: "text"; text: string }[]; details: AskClaudeResultDetails } {
-	const { result } = input;
-	const snapshot = retainDelegationSnapshot(result.snapshot);
-	const actions = buildSnapshotActionSummary(snapshot);
-	const cancelled = result.stopReason === "cancelled";
-
-	// The authoritative SDK result still wins over earlier streamed narration.
-	// Budget the model answer from the runner's own snapshot text rather than the
-	// retained display copy, so an answer that hits the cap carries one accurate
-	// omission count instead of a second marker stacked on an already-marked one.
-	const resultText = result.snapshot.resultText;
-	const answer = resultText ?? result.snapshot.responseText;
-	const answerOmittedChars = (resultText === undefined ? result.snapshot.responseOmittedChars : result.snapshot.resultOmittedChars) ?? 0;
-
-	// Policy annotations, not prose: they tell the model the answer was produced
-	// under an overridden permission mode or with tools denied.
-	const annotations: string[] = [];
-	if (result.permission?.overridden) {
-		const policyLabels = managedPolicyLabels(result.managedPolicy);
-		annotations.push(`[Claude Code permission mode: requested ${result.permission.requested}, runtime ${result.permission.effective}${policyLabels.length ? `; observed managed policy: ${policyLabels.join(", ")}` : "; Claude settings or managed policy may have overridden it"}.]`);
-	}
-	if (result.permissionDenials.length) {
-		const denied = result.permissionDenials
-			.slice(0, 5)
-			.map((item) => `${item.toolName}${item.reasonType ? ` (${item.reasonType})` : ""}`)
-			.join(", ");
-		annotations.push(`[Claude Code permission denials: ${denied}${result.permissionDenials.length > 5 ? ", …" : ""}.]`);
-	}
-
-	const text = assembleModelResult({
-		answer: cancelled
-			? answer
-				? `Cancelled by user. Partial response before cancellation:\n\n${answer}`
-				: "Cancelled by user before Claude Code produced a response."
-			: answer,
-		answerOmittedChars: answer ? answerOmittedChars : 0,
-		actions: actions ? `[Claude Code actions: ${actions}]` : "",
-		annotations,
-	});
-
-	return {
-		content: [{ type: "text" as const, text }],
-		details: {
-			prompt: retainAskClaudePrompt(input.prompt),
-			executionTime: input.executionTime,
-			actions,
-			capabilityMode: input.capabilityMode,
-			requestedModel: input.requestedModel,
-			thinking: input.thinking,
-			isolated: input.isolated,
-			...(cancelled ? { cancelled: true, error: true } : {}),
-			permission: result.permission,
-			permissionDenials: snapshot.permissionDenials,
-			managedPolicy: result.managedPolicy,
-			snapshot,
-		},
-	};
 }
 
 // Provider path: the query runs with `tools: []`, so the only tools CC can
@@ -1502,8 +1073,8 @@ function steerBlocks(messages: Context["messages"]): ContentBlockParam[] | null 
  *  it, so count-based sync would skip it forever — rebuild instead, which
  *  re-imports the message from pi's context. */
 function steerMissedSession(text: string): void {
-	if (!sharedSession) return;
-	sharedSession = { ...sharedSession, needsRebuild: true };
+	if (!sessionSync.current) return;
+	sessionSync.markRebuild();
 	debug(`provider: steer never reached CC, marked session for rebuild: ${text.slice(0, 60)}`);
 }
 
@@ -1616,7 +1187,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next
 		// turn a full rebuild and a flushed prompt cache.
-		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = context.messages.length;
+		if (sessionSync.current && resultCtx === ctx()) sessionSync.advanceCursor(context.messages.length);
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
 		return stream;
 	}
@@ -1627,7 +1198,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsg = context.messages[context.messages.length - 1];
 	if (lastMsg?.role === "toolResult") {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
+		if (sessionSync.current && activeQueryContexts.size === 0) sessionSync.advanceCursor(context.messages.length);
 		// No query owns this result, so there is no context to reset: resetTurnState
 		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
 		// stranding the blocks it had already emitted. A throwaway context just
@@ -1695,7 +1266,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			isReentrant,
 			activeQueryContexts: activeQueryContexts.size,
 			activeQueryExists: queryCtx.activeQuery !== null,
-			sharedSession: sharedSession ? { sessionId: sharedSession.sessionId.slice(0, 8), cursor: sharedSession.cursor } : null,
+			sharedSession: sessionSync.current ? { sessionId: sessionSync.current.sessionId.slice(0, 8), cursor: sessionSync.current.cursor } : null,
 			messageRoles: context.messages.map((m, i) => `[${i}]${m.role}`).join(" "),
 		});
 		// Recover: use a continuation prompt so the SDK doesn't send an empty text block
@@ -1816,7 +1387,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 			// --- Abort detection in normal completion path ---
 			if (wasAborted || options?.signal?.aborted) {
-				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+				if (sessionSync.current) sessionSync.markRebuild(true);
 				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "aborted";
@@ -1831,17 +1402,17 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 
 			// --- Capture session ID ---
-			const sessionId = capturedSessionId ?? sharedSession?.sessionId;
+			const sessionId = capturedSessionId ?? sessionSync.current?.sessionId;
 			if (syncResult.preserveSharedSession) {
-				if (capturedSessionId && capturedSessionId !== sharedSession?.sessionId) {
+				if (capturedSessionId && capturedSessionId !== sessionSync.current?.sessionId) {
 					deleteSession(capturedSessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
 					debug(`provider: query done, deleted ephemeral session ${capturedSessionId.slice(0, 8)} to preserve shared session`);
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 			} else if (sessionId) {
-				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
+				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sessionSync.current?.cursor ?? 0);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-				sharedSession = { sessionId, cursor, cwd };
+				sessionSync.restore({ sessionId, cursor, cwd });
 			}
 
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
@@ -1852,10 +1423,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		})
 		.catch((error) => {
 			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error);
-			if ((wasAborted || options?.signal?.aborted) && sharedSession) {
-				sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+			if ((wasAborted || options?.signal?.aborted) && sessionSync.current) {
+				sessionSync.markRebuild(true);
 			} else {
-				sharedSession = null;
+				sessionSync.clear();
 			}
 			promptStream.fail(error instanceof Error ? error : new Error(String(error)));
 			if (queryCtx.turnOutput) {
@@ -1901,47 +1472,51 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 // --- DelegateToClaude: prompt and wait ---
 
-// One source for the delegation default so the query and the model/permission
-// metadata rendered beside it cannot disagree about which model was requested.
-const ASK_CLAUDE_DEFAULT_MODEL = "opus";
+/** Resolve common runtime inputs once; skills and session mode stay caller-owned. */
+function delegationQueryInputs(input: {
+	requestedModel: string;
+	mode: CapabilityMode;
+	cwd: string;
+	thinking?: string;
+	permissionMode?: PermissionMode;
+	debugTag: string;
+}) {
+	const model = resolveModel(input.requestedModel);
+	return {
+		policy: resolveDelegationPolicy(input.mode, { permissionMode: input.permissionMode }),
+		cwd: input.cwd,
+		env: { ...process.env, ...CC_CHILD_ENV },
+		settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
+		cliModel: model ? claudeCodeModelId(model, longContextSettings) : normalizeClaudeModelRequest(input.requestedModel),
+		effort: input.thinking && input.thinking !== "off" ? REASONING_TO_EFFORT[input.thinking] : undefined,
+		pathToClaudeCodeExecutable: providerSettings.pathToClaudeCodeExecutable,
+		debugOptions: makeCliDebugOptions(input.debugTag),
+	};
+}
 
 async function runAskClaudeDelegation(
 	prompt: string,
 	mode: "full" | "read" | "none",
 	signal?: AbortSignal,
-	options?: {
-		systemPrompt?: string;
-		appendSkills?: boolean;
-		onSnapshot?: (snapshot: DelegationSnapshot) => void;
-		model?: string;
-		thinking?: string;
-		isolated?: boolean;
-		context?: Context["messages"];
-		permissionMode?: PermissionMode;
-		/** Pi's execute-context cwd; process.cwd() is only the fallback. */
-		cwd?: string;
-		/** Test seam forwarded to the delegation runner. */
-		queryFactory?: DelegationQueryFactory;
-	},
+	options?: ForegroundRunOptions,
 ): Promise<DelegationRunResult> {
 	const cwd = options?.cwd ?? process.cwd();
 	const requestedModel = options?.model ?? ASK_CLAUDE_DEFAULT_MODEL;
-	const model = resolveModel(requestedModel);
-	const modelId = model?.id ?? normalizeClaudeModelRequest(requestedModel);
-	const cliModel = model ? claudeCodeModelId(model, longContextSettings) : modelId;
+	const queryInputs = delegationQueryInputs({ requestedModel, mode, cwd, thinking: options?.thinking, permissionMode: options?.permissionMode, debugTag: "askclaude" });
+	const { policy: delegationPolicy, cliModel, effort } = queryInputs;
 
 	const isolated = options?.isolated ?? true;
 
 	// Session resume for shared mode — reuse provider's session if it exists,
 	// otherwise create one from pi's context.
-	// Note: doesn't update sharedSession.cursor after completion, so the next
+	// Note: doesn't update sessionSync.current.cursor after completion, so the next
 	// provider call will see missed messages and trigger a Case 4 rebuild.
 	let resumeSessionId: string | null = null;
 	if (!isolated && options?.context?.length) {
-		if (sharedSession) {
+		if (sessionSync.current) {
 			// Provider already has a session — just resume from it
 			// Any missed messages from other providers were already handled by the provider's Case 4
-			resumeSessionId = sharedSession.sessionId;
+			resumeSessionId = sessionSync.current.sessionId;
 		} else {
 			// No provider session yet — create one from pi's context
 			const contextWithPrompt = [...options.context, { role: "user" as const, content: prompt, timestamp: Date.now() }];
@@ -1957,7 +1532,6 @@ async function runAskClaudeDelegation(
 	// Resolved only when the answer would be used. The throw is justified by what a
 	// miss would cost, so where it costs nothing — skills switched off, or no reader
 	// to open a skill file with — an unrelated miss must not fail the call.
-	const delegationPolicy = resolveDelegationPolicy(mode, { permissionMode: options?.permissionMode });
 	const skillReadTool = Array.isArray(delegationPolicy.tools) && delegationPolicy.tools.includes("Read")
 		? "native"
 		: delegationPolicy.capabilityMode === "full" ? "native" : "none";
@@ -1968,29 +1542,14 @@ async function runAskClaudeDelegation(
 		? renderSkillsBlock(collectPromptSkills(skillCapture), skillReadTool)
 		: undefined;
 
-	// Effort
-	const effort = options?.thinking && options.thinking !== "off"
-		? REASONING_TO_EFFORT[options.thinking] : undefined;
-
-	const queryInputs = {
-		policy: delegationPolicy,
-		cwd,
-		env: { ...process.env, ...CC_CHILD_ENV },
-		settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
-		cliModel,
-		effort,
-		systemPromptAppend: skillsBlock,
-		pathToClaudeCodeExecutable: providerSettings.pathToClaudeCodeExecutable,
-		debugOptions: makeCliDebugOptions("askclaude"),
-	};
 	// Isolation and resume are mutually exclusive by type: an isolated call has no
 	// session to resume, so the branch is made here rather than defended for later.
 	const resolved = buildDelegationQueryOptions(isolated
-		? { ...queryInputs, isolated: true }
-		: { ...queryInputs, isolated: false, resumeSessionId });
+		? { ...queryInputs, systemPromptAppend: skillsBlock, isolated: true }
+		: { ...queryInputs, systemPromptAppend: skillsBlock, isolated: false, resumeSessionId });
 
 	debug("delegation:",
-		`mode=${mode} model=${modelId} cliModel=${cliModel} effort=${effort ?? "default"}`,
+		`mode=${mode} model=${requestedModel} cliModel=${cliModel} effort=${effort ?? "default"}`,
 		`permission=${resolved.policy.requestedPermissionMode} isolated=${isolated} resume=${resumeSessionId?.slice(0, 8) ?? "none"}`,
 		`skills=${Boolean(skillsBlock)} promptLen=${prompt.length}`);
 
@@ -2025,193 +1584,6 @@ async function runAskClaudeDelegation(
 	return result;
 }
 
-// --- Foreground delegation execution ---
-
-interface ForegroundDelegationResult {
-	content: { type: "text"; text: string }[];
-	details: AskClaudeResultDetails;
-}
-
-interface ForegroundDelegationInput {
-	toolCallId: string;
-	/** Shown in the live overlay slot and retained in details as the call's prompt. */
-	displayPrompt: string;
-	/** The prompt actually sent to Claude Code (may wrap displayPrompt in a role/launch context). */
-	delegationPrompt: string;
-	mode: "full" | "read" | "none";
-	isolated: boolean;
-	requestedModel: string;
-	thinking?: string;
-	signal?: AbortSignal;
-	onUpdate?: (update: ForegroundDelegationResult) => void;
-	systemPrompt?: string;
-	appendSkills?: boolean;
-	permissionMode?: PermissionMode;
-	/** Pi branch messages for isolated=false session resume; undefined when isolated. */
-	context?: Context["messages"];
-	cwd?: string;
-	/** Persisted label facts (e.g. SpawnClaudeAgent foreground profile) merged into every published details object. */
-	detailExtras?: Pick<AskClaudeResultDetails, "origin" | "profile">;
-	/** Test seam forwarded to the delegation runner. */
-	queryFactory?: DelegationQueryFactory;
-}
-
-/**
- * The one foreground execution path: blocking DelegateToClaude calls and foreground
- * SpawnClaudeAgent calls both run through here, so there is a single
- * synchronous delegation runner, retained-snapshot/live-update pipeline, live
- * overlay slot, finalization, and error-promotion contract. Callers differ only
- * in how they build the delegation prompt and which label extras they persist.
- */
-async function executeForegroundDelegation(input: ForegroundDelegationInput): Promise<ForegroundDelegationResult> {
-	const { toolCallId, displayPrompt, mode, isolated, requestedModel } = input;
-	const extras = input.detailExtras ?? {};
-	const start = Date.now();
-	let lastSnapshot: DelegationSnapshot | undefined;
-	let lastPublishedAt = 0;
-	let pendingPublish: ReturnType<typeof setTimeout> | undefined;
-
-	const publishSnapshot = (force = false) => {
-		if (!lastSnapshot) return;
-		const now = Date.now();
-		const delay = 100 - (now - lastPublishedAt);
-		if (!force && delay > 0) {
-			pendingPublish ??= setTimeout(() => {
-				pendingPublish = undefined;
-				publishSnapshot(true);
-			}, delay);
-			return;
-		}
-		if (pendingPublish) clearTimeout(pendingPublish);
-		pendingPublish = undefined;
-		lastPublishedAt = now;
-		const update = buildAskClaudePartialUpdate(lastSnapshot, {
-			prompt: displayPrompt,
-			executionTime: now - start,
-			capabilityMode: mode,
-			requestedModel,
-			thinking: input.thinking,
-			isolated,
-		});
-		const details = { ...update.details, ...extras };
-		// Same bounded, retained, redacted record the tool row streams — the
-		// details overlay's live view adds no second retention path.
-		updateLiveAskClaudeCall({ toolCallId, startedAt: start, prompt: displayPrompt, details });
-		input.onUpdate?.({ ...update, details });
-	};
-	const progressInterval = setInterval(() => publishSnapshot(true), 1000);
-	const stopPublishing = () => {
-		clearInterval(progressInterval);
-		if (pendingPublish) clearTimeout(pendingPublish);
-	};
-
-	// Seed the live slot before the first snapshot so /claude-details and
-	// ctrl+n can show the running call immediately. The slot keeps the final
-	// details after completion until the session branch persists the result,
-	// which then shadows it; the next call replaces the slot.
-	updateLiveAskClaudeCall({
-		toolCallId,
-		startedAt: start,
-		prompt: displayPrompt,
-		details: {
-			prompt: retainAskClaudePrompt(displayPrompt),
-			executionTime: 0,
-			capabilityMode: mode,
-			requestedModel,
-			thinking: input.thinking,
-			isolated,
-			...extras,
-		},
-	});
-
-	try {
-		const result = await runAskClaudeDelegation(input.delegationPrompt, mode, input.signal, {
-			systemPrompt: input.systemPrompt,
-			appendSkills: input.appendSkills,
-			onSnapshot: (snapshot) => {
-				lastSnapshot = snapshot;
-				publishSnapshot();
-			},
-			model: requestedModel,
-			thinking: input.thinking,
-			isolated,
-			permissionMode: input.permissionMode,
-			context: input.context,
-			cwd: input.cwd,
-			queryFactory: input.queryFactory,
-		});
-		stopPublishing();
-		const finalized = finalizeAskClaudeResult({
-			result,
-			prompt: displayPrompt,
-			executionTime: Date.now() - start,
-			capabilityMode: mode,
-			requestedModel,
-			thinking: input.thinking,
-			isolated,
-		});
-		const details = { ...finalized.details, ...extras };
-		updateLiveAskClaudeCall({ toolCallId, startedAt: start, prompt: displayPrompt, details });
-		return { content: finalized.content, details };
-	} catch (err) {
-		stopPublishing();
-		debug(`foreground delegation error: mode=${mode}, model=${requestedModel}, isolated=${isolated}, elapsed=${((Date.now() - start) / 1000).toFixed(1)}s, error=`, err);
-		// Summarize the retained snapshot, not the raw one: the failure path
-		// persists and displays the same bounded, redacted record as success.
-		const retainedSnapshot = lastSnapshot ? retainDelegationSnapshot(lastSnapshot) : undefined;
-		const errorDetails: AskClaudeResultDetails = {
-			prompt: retainAskClaudePrompt(displayPrompt),
-			executionTime: Date.now() - start,
-			actions: retainedSnapshot ? buildSnapshotActionSummary(retainedSnapshot) : undefined,
-			capabilityMode: mode,
-			requestedModel,
-			thinking: input.thinking,
-			isolated,
-			error: true,
-			permissionDenials: retainedSnapshot?.permissionDenials,
-			snapshot: retainedSnapshot,
-			...extras,
-		};
-		updateLiveAskClaudeCall({ toolCallId, startedAt: start, prompt: displayPrompt, details: errorDetails });
-		return {
-			content: [{ type: "text" as const, text: assembleModelResult({ answer: `Error: ${errorMessage(err)}` }) }],
-			details: errorDetails,
-		};
-	}
-}
-
-// --- SpawnClaudeAgent: background jobs and foreground calls ---
-
-let spawnClaudeAgentToolName = "SpawnClaudeAgent";
-
-/** Bounded launch facts for the persisted spawn result — never the diff text itself. */
-interface SpawnClaudeAgentResultDetails {
-	jobId?: string;
-	mode?: CapabilityMode;
-	/** Derived role/presentation label; capability is selected by `mode`. */
-	profile?: AgentProfileId;
-	requestedModel?: string;
-	thinking?: string;
-	launchCwd?: string;
-	launchCapturedAt?: number;
-	diffSource?: string;
-	/** True when the launch artifact's diff or status text was truncated to its bound. */
-	diffArtifactTruncated?: boolean;
-	error?: boolean;
-}
-
-/**
- * Promote a failed spawn to pi's `toolResult.isError`, exactly like
- * `askClaudeResultIsError`: a rejected second spawn or a diff-capture failure
- * must reach the model as an error result, not as a successful-looking answer.
- */
-function spawnClaudeAgentResultIsError(
-	event: { toolName: string; isError: boolean; details?: unknown },
-): { isError: true } | undefined {
-	if (event.toolName !== spawnClaudeAgentToolName || event.isError) return undefined;
-	return (event.details as SpawnClaudeAgentResultDetails | undefined)?.error ? { isError: true } : undefined;
-}
-
 /**
  * Run one background job through the shared delegation runner. Always a fresh
  * isolated Claude session; `mode` selects the same none/read/full capability
@@ -2229,24 +1601,11 @@ function runBackgroundJobDelegation(input: {
 	onSnapshot: (snapshot: DelegationSnapshot) => void;
 	permissionMode?: PermissionMode;
 }): Promise<DelegationRunResult> {
-	const model = resolveModel(input.requestedModel);
-	const cliModel = model
-		? claudeCodeModelId(model, longContextSettings)
-		: normalizeClaudeModelRequest(input.requestedModel);
-	const policy = resolveDelegationPolicy(input.profile.capabilityMode, { permissionMode: input.permissionMode });
-	const effort = input.thinking && input.thinking !== "off"
-		? REASONING_TO_EFFORT[input.thinking] : undefined;
-	const resolved = buildDelegationQueryOptions({
-		policy,
-		cwd: input.cwd,
-		env: { ...process.env, ...CC_CHILD_ENV },
-		settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
-		cliModel,
-		effort,
-		pathToClaudeCodeExecutable: providerSettings.pathToClaudeCodeExecutable,
-		debugOptions: makeCliDebugOptions("spawnagent"),
-		isolated: true,
+	const queryInputs = delegationQueryInputs({
+		...input, mode: input.profile.capabilityMode, debugTag: "spawnagent",
 	});
+	const { cliModel, effort } = queryInputs;
+	const resolved = buildDelegationQueryOptions({ ...queryInputs, isolated: true });
 	debug("spawnClaudeAgent:",
 		`profile=${input.profile.id} model=${input.requestedModel} cliModel=${cliModel}`,
 		`effort=${effort ?? "default"} permission=${resolved.policy.requestedPermissionMode} promptLen=${input.prompt.length}`);
@@ -2260,369 +1619,7 @@ function runBackgroundJobDelegation(input: {
 	});
 }
 
-function spawnedJobResultText(record: BackgroundJobRecord): string {
-	const mode = AGENT_PROFILES[record.profile].capabilityMode;
-	const worker = mode === "full";
-	const capability = mode === "none" ? "no-access" : mode === "read" ? "read-only" : "full-capability";
-	const parts = [
-		`Started background Claude job ${record.id} (mode=${mode}, agent=${record.profile}, model=${record.requestedModel}${record.thinking ? `, thinking=${record.thinking}` : ""}).`,
-		`It runs in a fresh isolated ${capability} Claude session in ${record.launch.cwd} on context captured at launch${record.launch.diff ? ` (review diff artifact: ${record.launch.diff.source})` : ""}.`,
-		"One background job runs per session; a second spawn fails until this one finishes.",
-	];
-	if (worker) {
-		parts.push("SINGLE-WRITER WARNING: this worker edits the current checkout while it runs. Until its completion message arrives, do not edit, create, or delete files or run mutating commands in this checkout — inspect and discuss only.");
-	}
-	parts.push(`When the job reaches a terminal state its bounded result is delivered into this conversation as a message you will see on a later turn — ${worker ? "" : "keep working normally; "}there are no status, result, or cancel tools to poll.`);
-	return parts.join(" ");
-}
-
-/** One foreground SpawnClaudeAgent call handed to the shared foreground execution implementation. */
-interface SpawnForegroundRun {
-	toolCallId: string;
-	/** The caller's task text — displayed/persisted as the call's prompt. */
-	task: string;
-	/** The full delegation prompt (role prompt + launch context + task, reviewer diff included). */
-	prompt: string;
-	profile: AgentProfile;
-	requestedModel: string;
-	thinking?: string;
-	isolated: boolean;
-	cwd: string;
-	signal: AbortSignal;
-	onUpdate?: (update: ForegroundDelegationResult) => void;
-	systemPrompt?: string;
-	/** Pi branch messages when isolated=false; resumed exactly like DelegateToClaude shared mode. */
-	context?: Context["messages"];
-}
-
-/** Injected effects for `registerSpawnClaudeAgent` — the seam unit tests replace all of them. */
-interface SpawnClaudeAgentDeps {
-	/** SpawnClaudeAgent shares DelegateToClaude's opt-in; nothing registers when it is off. */
-	enabled: boolean;
-	/**
-	 * Whether full capability is offered. Wired from the
-	 * DelegateToClaude contract's allowFullMode lockout so a configuration that forbids
-	 * full mode cannot be bypassed through SpawnClaudeAgent.
-	 */
-	allowFull: boolean;
-	/** Effective requested permission mode, for rendering only. */
-	requestedPermissionMode?: string;
-	/** Shared atomic lease for every full-capability Claude writer. */
-	writeLease?: CheckoutWriteLease;
-	jobs: BackgroundJobManager;
-	captureDiff: (input: { cwd: string; base?: string; capturedAt: number }) => Promise<ReviewerDiffArtifact>;
-	runJob: (input: {
-		prompt: string;
-		profile: AgentProfile;
-		requestedModel: string;
-		thinking?: string;
-		cwd: string;
-		signal: AbortSignal;
-		onSnapshot: (snapshot: DelegationSnapshot) => void;
-	}) => Promise<DelegationRunResult>;
-	/** Foreground execution — production wires the shared `executeForegroundDelegation`. */
-	runForeground: (input: SpawnForegroundRun) => Promise<ForegroundDelegationResult>;
-	cwd?: (ctx: Pick<ExtensionContext, "cwd">) => string;
-	now?: () => number;
-}
-
-/** Mirror Pi's default (no-renderResult) tool result rendering for background spawn results. */
-function renderSpawnBackgroundResult(
-	result: { content: Array<{ type: string; text?: string }> },
-	options: { expanded: boolean },
-	theme: Parameters<typeof renderAskClaudeResult>[2],
-): Text {
-	const output = result.content[0]?.type === "text" ? result.content[0].text ?? "" : "";
-	const lines = output.split("\n");
-	const displayLines = options.expanded ? lines : lines.slice(0, 10);
-	const remaining = lines.length - displayLines.length;
-	let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
-	if (remaining > 0) {
-		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-	}
-	return new Text(text, 0, 0);
-}
-
-/**
- * Narrow adapter seam that wires SpawnClaudeAgent into Pi: tool registration,
- * error-result promotion, and the session lifecycle cleanup of background
- * jobs. Everything impure — the job manager, reviewer diff capture, background
- * delegation, foreground execution, cwd, clock — arrives injected so the wiring
- * is deterministic to test; production injects the real implementations from
- * the extension entry.
- *
- * Both execution modes are callers of the shared delegation runner. A
- * background job returns promptly with a job ID and never enters foreground
- * finalization or provider QueryContext; a foreground call blocks and returns
- * its bounded result through the same foreground implementation DelegateToClaude uses.
- */
-function registerSpawnClaudeAgent(pi: Pick<ExtensionAPI, "registerTool" | "on">, deps: SpawnClaudeAgentDeps): void {
-	if (!deps.enabled) return;
-	const { jobs } = deps;
-	const cwdOf = deps.cwd ?? ((ctx: Pick<ExtensionContext, "cwd">) => ctx.cwd);
-	const now = deps.now ?? Date.now;
-	const renderPermissionMode = deps.requestedPermissionMode ?? DEFAULT_PERMISSION_MODE;
-	const writeLease = deps.writeLease ?? new CheckoutWriteLease();
-
-	pi.on("tool_result", (event) => spawnClaudeAgentResultIsError(event));
-	// Background jobs are Pi-session-scoped. Both handlers are async and Pi
-	// 0.84.2 awaits them, so this cleanup — bounded by the manager's shutdown
-	// grace — really completes before the session is replaced or torn down;
-	// jobs that settle inside the grace keep their genuine terminal state and
-	// only unconfirmed ones are recorded as abandoned.
-	pi.on("session_start", async (event) => {
-		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
-			await jobs.reset();
-		}
-	});
-	pi.on("session_shutdown", async () => {
-		await jobs.shutdown();
-	});
-
-	const modeValues = deps.allowFull ? ["none", "read", "full"] as const : ["none", "read"] as const;
-	const modeDescription = '"none": no tools. "read": read-only repository/web access.'
-		+ (deps.allowFull
-			? ' "full": Bash/Edit/Write; only for explicit user-requested implementation.'
-			: "");
-	const spawnClaudeAgentParams = Type.Object({
-		task: Type.String({ description: "Complete task instructions; isolated agents do not see Pi history." }),
-		mode: StringEnum(modeValues, { description: modeDescription }),
-		review: Type.Optional(Type.Object({
-			base: Type.Optional(Type.String({ description: "Git ref; the review diff starts at its merge base with HEAD." })),
-		}, { description: 'Read-mode code review. Omit base to review working-tree changes against HEAD.' })),
-		user_requested: Type.Optional(Type.Boolean({ description: "Required true for full mode; set only for explicit user-requested implementation delegation." })),
-		execution: Type.Optional(StringEnum(["foreground", "background"] as const, { description: '"background" (default): return a job ID now and deliver the result later. "foreground": block and return the result directly.' })),
-		isolated: Type.Optional(Type.Boolean({ description: "Foreground only. true (default): fresh session. false: include Pi history. Background is always isolated." })),
-		model: Type.Optional(Type.String({ description: 'Model name or ID. Default: "opus".' })),
-		thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: "Thinking effort level. Omit to use Claude Code's default." })),
-	});
-	pi.registerTool<typeof spawnClaudeAgentParams>({
-		name: spawnClaudeAgentToolName,
-		label: "Spawn Claude Agent",
-		description: "Start a foreground or background (default) Claude Code agent. Background returns a job ID and delivers the result later; do not poll. One background job may run per Pi session."
-			+ (deps.allowFull ? " Full mode requires explicit user delegation; do not edit concurrently with a background full-mode agent." : ""),
-		parameters: spawnClaudeAgentParams,
-		renderCall(args, theme) {
-			let text = theme.fg("mdLink", theme.bold("SpawnClaudeAgent "));
-			// Restored Phase 3c tool calls still carry `profile`; derive their
-			// capability so old transcript rows never render `mode=undefined`.
-			const legacyProfile = (args as typeof args & { profile?: unknown }).profile;
-			const mode = args.mode ?? (typeof legacyProfile === "string" ? agentCapabilityMode(legacyProfile) : undefined);
-			const tags = [`mode=${mode ?? "unavailable"}`, `execution=${args.execution ?? "background"}`];
-			if (typeof legacyProfile === "string") tags.push(`agent=${legacyProfile}`);
-			if (args.review) tags.push("review");
-			if (args.user_requested) tags.push("user-requested");
-			if (args.isolated !== undefined) tags.push(args.isolated ? "isolated" : "shared");
-			tags.push(`model=${args.model ?? ASK_CLAUDE_DEFAULT_MODEL}`);
-			if (args.thinking) tags.push(`thinking=${args.thinking}`);
-			if (args.review?.base) tags.push(`base=${args.review.base}`);
-			text += `${theme.fg("accent", `[${tags.join(", ")}]`)} `;
-			const truncated = args.task.length > PREVIEW_MAX_CHARS ? args.task.substring(0, PREVIEW_MAX_CHARS) : args.task;
-			const lines = truncated.split("\n").slice(0, PREVIEW_MAX_LINES);
-			text += theme.fg("muted", `"${lines.join("\n")}"`);
-			if (args.task.length > PREVIEW_MAX_CHARS || args.task.split("\n").length > PREVIEW_MAX_LINES) text += theme.fg("dim", " …");
-			return new Text(text, 0, 0);
-		},
-		renderResult(result, options, theme, context) {
-			// Foreground calls carry the DelegateToClaude-shaped details (marked with
-			// origin) and reuse the same rich renderer; background results keep
-			// Pi's plain default-style rendering.
-			const details = result.details as AskClaudeResultDetails | SpawnClaudeAgentResultDetails | undefined;
-			if (details && "origin" in details && details.origin === "spawn-foreground") {
-				return renderAskClaudeResult(result, options, theme, context, renderPermissionMode);
-			}
-			return renderSpawnBackgroundResult(result, options, theme);
-		},
-		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const requestedModel = params.model ?? ASK_CLAUDE_DEFAULT_MODEL;
-			const rawMode: unknown = params.mode;
-			const rawReview: unknown = params.review;
-			const rawExecution: unknown = params.execution ?? "background";
-			const mode = rawMode === "none" || rawMode === "read" || rawMode === "full"
-				? rawMode as CapabilityMode
-				: undefined;
-			const review = rawReview === undefined
-				? undefined
-				: typeof rawReview === "object" && rawReview !== null && !Array.isArray(rawReview)
-					? rawReview as { base?: unknown }
-					: null;
-			let profile: AgentProfile | undefined;
-			if (mode && review !== null && (!review || mode === "read")) {
-				profile = resolveAgentProfile(mode, review !== undefined);
-			}
-			const spawnError = (text: string): { content: { type: "text"; text: string }[]; details: SpawnClaudeAgentResultDetails } => ({
-				content: [{ type: "text" as const, text: assembleModelResult({ answer: `Error: ${text}` }) }],
-				details: { error: true, ...(mode ? { mode } : {}), ...(profile ? { profile: profile.id } : {}), requestedModel, thinking: params.thinking },
-			});
-
-			if (ctx.model?.baseUrl === "claude-delegation") {
-				debug("spawnClaudeAgent: blocked circular delegation (active provider is claude-delegation)");
-				return spawnError("SpawnClaudeAgent cannot be used when the active provider is claude-delegation — you're already running through Claude Code.");
-			}
-			if (!mode) {
-				return spawnError(`Unknown SpawnClaudeAgent capability mode: ${typeof rawMode === "string" ? rawMode : String(rawMode)}.`);
-			}
-			if (rawExecution !== "foreground" && rawExecution !== "background") {
-				return spawnError(`Unknown SpawnClaudeAgent execution mode: ${typeof rawExecution === "string" ? rawExecution : String(rawExecution)}.`);
-			}
-			const execution = rawExecution;
-			if (review === null) {
-				return spawnError("The review parameter must be an object when provided.");
-			}
-			if (review?.base !== undefined && typeof review.base !== "string") {
-				return spawnError("The review.base parameter must be a string when provided.");
-			}
-			if (review && mode !== "read") {
-				return spawnError('Review specialization requires mode="read".');
-			}
-			// Schema-level gating already hides full mode; this keeps a
-			// restored or hand-written call from bypassing the allowFullMode lockout.
-			if (mode === "full" && !deps.allowFull) {
-				return spawnError('SpawnClaudeAgent mode="full" is disabled: delegation.allowFullMode is false in this configuration.');
-			}
-			if (mode === "full" && params.user_requested !== true) {
-				return spawnError('SpawnClaudeAgent mode="full" requires user_requested=true, and that assertion may be supplied only when the user explicitly asked to delegate implementation to Claude.');
-			}
-			if (mode !== "full" && params.user_requested !== undefined) {
-				return spawnError('The user_requested assertion applies only to mode="full".');
-			}
-			if (!profile) return spawnError("Could not resolve the requested Claude agent role.");
-			// Background jobs are always fresh and isolated; silently ignoring
-			// isolated=false would change semantics the caller asked for.
-			if (execution === "background" && params.isolated === false) {
-				return spawnError('execution="background" always runs a fresh isolated Claude session; isolated=false (shared Pi conversation context) requires execution="foreground".');
-			}
-			// The initiating tool call owns the launch: a cancelled call must not
-			// start anything, and a spawn the manager would reject anyway must not
-			// pay for reviewer diff capture.
-			if (signal.aborted) {
-				debug("spawnClaudeAgent: tool call cancelled before launch");
-				return spawnError("SpawnClaudeAgent was cancelled before it launched anything; no agent was started.");
-			}
-			if (execution === "background") {
-				const alreadyRunning = jobs.running();
-				if (alreadyRunning) {
-					return spawnError(new BackgroundJobLimitError(alreadyRunning.id).message);
-				}
-			}
-
-			let writeLeaseHandle: CheckoutWriteLeaseHandle | undefined;
-			if (profile.capabilityMode === "full") {
-				writeLeaseHandle = writeLease.tryAcquire({
-					id: `${spawnClaudeAgentToolName}:${execution}:${toolCallId}`,
-					label: `${spawnClaudeAgentToolName} ${execution} full-mode worker`,
-				});
-				if (!writeLeaseHandle) return spawnError(checkoutWriteConflictText(writeLease));
-			}
-
-			try {
-				const cwd = cwdOf(ctx);
-				const capturedAt = now();
-				// The extension captures the reviewer's diff at launch in either
-				// execution mode; the agent never gets Bash to take its own. Capture
-				// failures (non-git directory, invalid base) must fail the spawn
-				// visibly here, not hand the reviewer an empty diff it would read as
-				// "no changes".
-				const diff = profile.requiresDiffArtifact
-					? await deps.captureDiff({ cwd, base: typeof review?.base === "string" ? review.base : undefined, capturedAt })
-					: undefined;
-				// The capture awaited; the tool call may have been cancelled meanwhile.
-				if (signal.aborted) {
-					debug("spawnClaudeAgent: tool call cancelled during launch capture");
-					return spawnError("SpawnClaudeAgent was cancelled during launch capture; no agent was started.");
-				}
-				const launch: BackgroundJobLaunch = { cwd, capturedAt, ...(diff ? { diff } : {}) };
-				const prompt = buildAgentJobPrompt({ profile, task: params.task, launch });
-
-				if (execution === "foreground") {
-					// Foreground blocks this tool call and returns the bounded result
-					// through the same implementation as DelegateToClaude: same runner, live
-					// updates, retained snapshot, overlay slot, and error semantics.
-					// Pi is blocked while it runs, so a foreground worker is naturally
-					// the only writer of the checkout.
-					const isolated = params.isolated ?? true;
-					debug(`spawnClaudeAgent: foreground mode=${mode} agent=${profile.id} isolated=${isolated} diff=${diff ? diff.source : "none"}`);
-					try {
-						return await deps.runForeground({
-							toolCallId,
-							task: params.task,
-							prompt,
-							profile,
-							requestedModel,
-							thinking: params.thinking,
-							isolated,
-							cwd,
-							signal,
-							onUpdate,
-							systemPrompt: ctx.getSystemPrompt(),
-							context: isolated ? undefined : buildSessionContext(ctx.sessionManager.getBranch()).messages as Context["messages"],
-						});
-					} finally {
-						writeLeaseHandle?.release();
-						writeLeaseHandle = undefined;
-					}
-				}
-
-				// From here the job's own AbortController owns its lifecycle; the
-				// initiating tool call's signal deliberately plays no further part.
-				const record = jobs.spawn({
-					profile: profile.id,
-					task: params.task,
-					requestedModel,
-					thinking: params.thinking,
-					launch,
-					execute: (run) => deps.runJob({
-						prompt,
-						profile,
-						requestedModel,
-						thinking: params.thinking,
-						cwd,
-						signal: run.signal,
-						onSnapshot: run.onSnapshot,
-					}),
-				});
-				if (writeLeaseHandle) {
-					const settlement = jobs.settled(record.id);
-					if (!settlement) {
-						// The worker already exists. Fail closed: deliberately orphan the
-						// handle while the process-global lease stays held, rather than let
-						// the outer catch release write ownership under a running writer.
-						writeLeaseHandle = undefined;
-						throw new Error(`Background worker ${record.id} has no settlement handle; checkout write ownership remains held because termination cannot be confirmed.`);
-					}
-					const transferredLease = writeLeaseHandle;
-					void settlement.finally(() => transferredLease.release());
-					writeLeaseHandle = undefined;
-				}
-				debug(`spawnClaudeAgent: started ${record.id} profile=${record.profile} diff=${diff ? diff.source : "none"}`);
-				return {
-					content: [{ type: "text" as const, text: spawnedJobResultText(record) }],
-					details: {
-						jobId: record.id,
-						mode,
-						profile: record.profile,
-						requestedModel: record.requestedModel,
-						thinking: record.thinking,
-						launchCwd: record.launch.cwd,
-						launchCapturedAt: record.launch.capturedAt,
-						...(diff ? { diffSource: diff.source, diffArtifactTruncated: diff.diffTruncated || diff.statusTruncated } : {}),
-					} satisfies SpawnClaudeAgentResultDetails,
-				};
-			} catch (err) {
-				writeLeaseHandle?.release();
-				if (!(err instanceof BackgroundJobLimitError)) {
-					debug(`spawnClaudeAgent error: mode=${mode} agent=${profile.id} execution=${execution} model=${requestedModel}`, err);
-				}
-				return spawnError(errorMessage(err));
-			}
-		},
-	});
-}
-
 // --- Extension registration ---
-
-const PREVIEW_MAX_CHARS = 1000;
-const PREVIEW_MAX_LINES = 6;
 
 let askClaudeToolName = "DelegateToClaude";
 
@@ -2657,8 +1654,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
-		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
-		sharedSession = null;
+		debug(`${event}: clearing session ${sessionSync.current?.sessionId?.slice(0, 8) ?? "none"}`);
+		sessionSync.clear();
 		shownProviderPermissionOverrides.clear();
 		// A live DelegateToClaude record from a previous session branch must not surface
 		// in the details overlay of the next one.
@@ -2739,9 +1736,9 @@ export default function (pi: ExtensionAPI) {
 	// triggers CC's autocompact-thrashing guard (issue #8). Force the next
 	// call down the REBUILD path so CC sees the current history.
 	const markRebuild = (event: string) => {
-		if (sharedSession) {
-			debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
-			sharedSession = { ...sharedSession, needsRebuild: true };
+		if (sessionSync.current) {
+			debug(`${event}: marking needsRebuild on session ${sessionSync.current.sessionId.slice(0, 8)}`);
+			sessionSync.markRebuild();
 		}
 	};
 	pi.on("session_compact", (event) => markRebuild(`session_compact:${event.reason}:willRetry=${event.willRetry}`));
@@ -2909,6 +1906,7 @@ export default function (pi: ExtensionAPI) {
 	// first-class Claude tools the fork exposes. The adapter seam also wires the
 	// background jobs' session lifecycle cleanup (async, awaited by Pi 0.84.2).
 	registerSpawnClaudeAgent(pi, {
+		debug,
 		enabled: Boolean(askConf?.enabled),
 		// Spawn modes share DelegateToClaude's full-capability lockout.
 		allowFull: askContract.allowFull,

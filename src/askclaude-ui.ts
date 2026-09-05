@@ -19,6 +19,9 @@ import {
 } from "./delegation-retention.js";
 import { managedPolicyLabels, type ManagedPolicySummary, type PermissionObservation } from "./query-policy.js";
 
+export const PREVIEW_MAX_CHARS = 1000;
+export const PREVIEW_MAX_LINES = 6;
+
 export interface AskClaudeResultDetails {
 	prompt?: string;
 	executionTime?: number;

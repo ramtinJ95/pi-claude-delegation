@@ -125,14 +125,11 @@ export function mergeBackgroundJobRecords(
 	const merged = [...persisted];
 	const indexById = new Map(merged.map((record, index) => [record.id, index]));
 	for (const record of managerRecords) {
-		const view: BackgroundSessionRecord = {
-			kind: "background",
-			id: backgroundRecordId(record.id),
-			startMs: record.createdAt,
-			...(record.status === "running" ? { live: true } : {}),
-			data: buildCompletionEntryData(record),
-		};
-		const existing = indexById.get(view.id);
+		const id = backgroundRecordId(record.id);
+		const existing = indexById.get(id);
+		// Persisted terminal data already wins; do not normalize its shadow.
+		if (existing !== undefined && record.status !== "running" && !merged[existing].malformed) continue;
+		const view = normalizedManagerRecord(record);
 		if (existing === undefined) {
 			indexById.set(view.id, merged.length);
 			merged.push(view);
@@ -141,6 +138,25 @@ export function mergeBackgroundJobRecords(
 		}
 	}
 	return merged;
+}
+
+// Manager updates replace records, so identity is a revision key. Weak keys
+// retain neither evicted jobs nor old snapshots, and keep Markdown caches valid
+// for unchanged terminal fallbacks while a different job publishes progress.
+const normalizedManagerRecords = new WeakMap<BackgroundJobRecord, BackgroundSessionRecord>();
+function normalizedManagerRecord(record: BackgroundJobRecord): BackgroundSessionRecord {
+	let view = normalizedManagerRecords.get(record);
+	if (!view) {
+		view = {
+			kind: "background",
+			id: backgroundRecordId(record.id),
+			startMs: record.createdAt,
+			...(record.status === "running" ? { live: true } : {}),
+			data: buildCompletionEntryData(record),
+		};
+		normalizedManagerRecords.set(record, view);
+	}
+	return view;
 }
 
 /**

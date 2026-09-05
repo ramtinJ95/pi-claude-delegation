@@ -694,3 +694,19 @@ export function missingResultErrorText(assistantError?: SDKAssistantMessageError
 		? `Claude Code ended without a result after an assistant error: ${assistantError}`
 		: "Claude Code ended without a result";
 }
+
+/** Shared EOF invariant; callers handle cancellation before checking completion. */
+export function assertSdkResultReceived(sawResult: boolean, assistantError?: SDKAssistantMessageError): void {
+	if (!sawResult) throw new Error(missingResultErrorText(assistantError));
+}
+
+export function errorMessage(err: unknown): string {
+	if (err instanceof Error) return err.message;
+	if (err && typeof err === "object") {
+		const obj = err as Record<string, unknown>;
+		if (typeof obj.message === "string") return obj.message;
+		if (typeof obj.error === "string") return obj.error;
+		try { return JSON.stringify(err); } catch {}
+	}
+	return String(err);
+}

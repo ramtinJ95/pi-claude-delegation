@@ -5,6 +5,7 @@ import { PROMPT_MAX_CHARS, TOOL_FIELD_MAX_CHARS, retainText } from "./delegation
 import type { DelegationRunResult } from "./delegation-runner.js";
 import type { ManagedPolicySummary, PermissionObservation } from "./query-policy.js";
 import type { ReviewerDiffArtifact } from "./reviewer-diff.js";
+import { createProgressPublisher } from "./progress-publisher.js";
 
 // One running background Claude job per Pi session. A second spawn fails
 // visibly; configurability is deferred until dogfooding shows a need and the
@@ -27,23 +28,24 @@ export interface BackgroundJobLaunch {
 	diff?: ReviewerDiffArtifact;
 }
 
+/** Immutable record revisions are also the session overlay's cache keys. */
 export interface BackgroundJobRecord {
-	id: string;
-	profile: AgentProfileId;
-	task: string;
-	requestedModel: string;
-	thinking?: string;
-	status: BackgroundJobStatus;
-	createdAt: number;
-	endedAt?: number;
-	launch: BackgroundJobLaunch;
-	snapshot?: DelegationSnapshot;
+	readonly id: string;
+	readonly profile: AgentProfileId;
+	readonly task: string;
+	readonly requestedModel: string;
+	readonly thinking?: string;
+	readonly status: BackgroundJobStatus;
+	readonly createdAt: number;
+	readonly endedAt?: number;
+	readonly launch: BackgroundJobLaunch;
+	readonly snapshot?: DelegationSnapshot;
 	// Runner-observed policy state, stored only when the runner actually
 	// returned it (succeeded/cancelled). Failed and abandoned jobs never got a
 	// run result, so these stay absent rather than being borrowed or invented.
-	permission?: PermissionObservation;
-	managedPolicy?: ManagedPolicySummary;
-	error?: string;
+	readonly permission?: PermissionObservation;
+	readonly managedPolicy?: ManagedPolicySummary;
+	readonly error?: string;
 }
 
 export type BackgroundJobExecutor = (run: {
@@ -110,6 +112,7 @@ export class BackgroundJobManager {
 	private readonly records = new Map<string, BackgroundJobRecord>();
 	private readonly controllers = new Map<string, AbortController>();
 	private readonly settlements = new Map<string, Promise<void>>();
+	private readonly progress = new Map<string, ReturnType<typeof createProgressPublisher<DelegationSnapshot>>>();
 	private readonly listeners = new Set<(transition: BackgroundJobTransition) => void>();
 	private shutdownDepth = 0;
 	private counter = 0;
@@ -189,6 +192,7 @@ export class BackgroundJobManager {
 		this.evict();
 		const controller = new AbortController();
 		this.controllers.set(id, controller);
+		this.progress.set(id, createProgressPublisher((snapshot: DelegationSnapshot) => this.storeSnapshot(id, snapshot), this.now));
 		this.emit({ type: "spawned", record });
 		this.settlements.set(id, this.run(id, input.execute, controller.signal));
 		return record;
@@ -272,7 +276,7 @@ export class BackgroundJobManager {
 		try {
 			const result = await execute({
 				signal,
-				onSnapshot: (snapshot) => this.storeSnapshot(id, snapshot),
+				onSnapshot: (snapshot) => this.progress.get(id)?.push(snapshot),
 			});
 			this.finish(id, result.stopReason === "cancelled" ? "cancelled" : "succeeded", {
 				snapshot: retainDelegationSnapshot(result.snapshot),
@@ -304,6 +308,12 @@ export class BackgroundJobManager {
 		status: Exclude<BackgroundJobStatus, "running">,
 		patch: Pick<Partial<BackgroundJobRecord>, "snapshot" | "permission" | "managedPolicy" | "error">,
 	): void {
+		// Preserve the latest partial snapshot on failure/abandonment and never
+		// leave a delayed update capable of firing after a terminal transition.
+		const progress = this.progress.get(id);
+		progress?.flush();
+		progress?.stop();
+		this.progress.delete(id);
 		const record = this.records.get(id);
 		if (!record) {
 			this.onDebug?.(`background job ${id}: ignored ${status} settlement for a cleared record`);

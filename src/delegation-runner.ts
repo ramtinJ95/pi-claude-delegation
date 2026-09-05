@@ -7,7 +7,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
 	createDelegationSnapshot,
-	missingResultErrorText,
+	assertSdkResultReceived,
 	reduceDelegationMessage,
 	sdkResultErrorText,
 	type DelegationPermissionDenial,
@@ -53,8 +53,7 @@ const defaultQueryFactory: DelegationQueryFactory = (params) => query(params) as
  * Own one Claude-native Agent SDK query lifecycle.
  *
  * Provider QueryContext, MCP result routing, and Pi session synchronization do
- * not belong here. Blocking DelegateToClaude uses this now; background jobs can reuse
- * the same lifecycle later.
+ * not belong here. Foreground delegations and background jobs share this lifecycle.
  */
 export async function runDelegation(input: DelegationRunnerInput): Promise<DelegationRunResult> {
 	const now = input.now ?? Date.now;
@@ -139,15 +138,8 @@ export async function runDelegation(input: DelegationRunnerInput): Promise<Deleg
 			return completedResult("cancelled");
 		}
 
-		if (!sawResult) {
-			// No authoritative result and no abort: the stream ended early. Succeeding
-			// here would hand Pi whatever text happened to arrive first as a complete
-			// answer.
-			const failure = missingResultErrorText(snapshot.assistantError);
-			snapshot = { ...snapshot, status: "failed", error: failure, updatedAt: now() };
-			publish();
-			throw new Error(failure);
-		}
+		// The catch publishes missing-result failures just like transport failures.
+		assertSdkResultReceived(sawResult, snapshot.assistantError);
 
 		snapshot = { ...snapshot, status: "succeeded", updatedAt: now() };
 		publish();

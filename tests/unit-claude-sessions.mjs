@@ -121,6 +121,25 @@ function managerRecord(overrides = {}) {
 	};
 }
 
+describe("manager record normalization cache", () => {
+	it("preserves unchanged fallback identities and invalidates a replaced record", () => {
+		const terminal = managerRecord({ status: "succeeded" });
+		const running = managerRecord({ id: "running" });
+		const first = mergeBackgroundJobRecords([], [terminal, running]);
+		const second = mergeBackgroundJobRecords([], [terminal, { ...running, snapshot: bgSnapshot() }]);
+		assert.equal(first[0], second[0]);
+		assert.equal(first[0].data, second[0].data);
+		assert.notEqual(first[1].data, second[1].data);
+	});
+
+	it("does not normalize a manager record shadowed by a persisted terminal entry", () => {
+		const persisted = extractBackgroundJobRecords([jobEntry(completionData({ jobId: "terminal" }))]);
+		const record = managerRecord({ id: "terminal", status: "succeeded" });
+		Object.defineProperty(record, "snapshot", { get() { assert.fail("shadowed record was normalized"); } });
+		assert.equal(mergeBackgroundJobRecords(persisted, [record])[0], persisted[0]);
+	});
+});
+
 function jobsStub(records = []) {
 	const listeners = new Set();
 	return {

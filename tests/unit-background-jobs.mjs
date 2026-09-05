@@ -71,6 +71,48 @@ function pendingExecutor() {
 }
 
 describe("background job manager", () => {
+	it("coalesces snapshot work, then preserves the latest partial snapshot on failure", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+		const manager = testManager();
+		const pending = pendingExecutor();
+		const transitions = [];
+		manager.subscribe((event) => transitions.push(event));
+		const record = manager.spawn(spawnInput(pending.execute));
+		for (let i = 0; i < 100; i++) {
+			pending.state.onSnapshot({ ...createDelegationSnapshot(1), responseText: `partial ${i}` });
+		}
+		assert.equal(transitions.filter((event) => event.type === "updated").length, 1);
+		t.mock.timers.tick(100);
+		assert.equal(manager.get(record.id).snapshot.responseText, "partial 99");
+		pending.state.onSnapshot({ ...createDelegationSnapshot(1), responseText: "last partial before failure" });
+		pending.reject(new Error("runner failed"));
+		await manager.settled(record.id);
+		assert.equal(manager.get(record.id).status, "failed");
+		assert.equal(manager.get(record.id).snapshot.responseText, "last partial before failure");
+		assert.equal(transitions.at(-1).type, "settled");
+		const count = transitions.length;
+		t.mock.timers.tick(1000);
+		assert.equal(transitions.length, count, "no delayed progress after settlement");
+	});
+
+	it("flushes pending progress before abandonment and cannot resurrect it after reset", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+		const manager = testManager({ sleep: instantSleep });
+		const pending = pendingExecutor();
+		const record = manager.spawn(spawnInput(pending.execute));
+		pending.state.onSnapshot({ ...createDelegationSnapshot(1), responseText: "first" });
+		pending.state.onSnapshot({ ...createDelegationSnapshot(1), responseText: "last" });
+		await manager.shutdown();
+		assert.equal(manager.get(record.id).status, "abandoned");
+		assert.equal(manager.get(record.id).snapshot.responseText, "last");
+		await manager.reset();
+		t.mock.timers.tick(1000);
+		pending.state.onSnapshot({ ...createDelegationSnapshot(1), responseText: "late" });
+		assert.deepEqual(manager.list(), []);
+		pending.resolve(runResult());
+		await tick();
+	});
+
 	it("pins the phase's concurrency, record, and shutdown-grace bounds", () => {
 		assert.equal(MAX_RUNNING_BACKGROUND_JOBS, 1);
 		assert.equal(BACKGROUND_JOB_RECORDS_MAX, 20);
@@ -517,28 +559,28 @@ describe("background job manager", () => {
 
 describe("SpawnClaudeAgent result contract", () => {
 	it("promotes a failed spawn to an error tool result for its own tool only", async () => {
-		const { __test } = await import("../src/index.js");
+		const { spawnClaudeAgentResultIsError, spawnedJobResultText } = await import("../src/spawn-claude-agent.js");
 		assert.deepEqual(
-			__test.spawnClaudeAgentResultIsError({ toolName: "SpawnClaudeAgent", isError: false, details: { error: true } }),
+			spawnClaudeAgentResultIsError({ toolName: "SpawnClaudeAgent", isError: false, details: { error: true } }),
 			{ isError: true },
 		);
 		assert.equal(
-			__test.spawnClaudeAgentResultIsError({ toolName: "SpawnClaudeAgent", isError: false, details: { jobId: "claude-job-x9k2-1" } }),
+			spawnClaudeAgentResultIsError({ toolName: "SpawnClaudeAgent", isError: false, details: { jobId: "claude-job-x9k2-1" } }),
 			undefined,
 		);
 		assert.equal(
-			__test.spawnClaudeAgentResultIsError({ toolName: "DelegateToClaude", isError: false, details: { error: true } }),
+			spawnClaudeAgentResultIsError({ toolName: "DelegateToClaude", isError: false, details: { error: true } }),
 			undefined,
 		);
 		assert.equal(
-			__test.spawnClaudeAgentResultIsError({ toolName: "SpawnClaudeAgent", isError: true, details: { error: true } }),
+			spawnClaudeAgentResultIsError({ toolName: "SpawnClaudeAgent", isError: true, details: { error: true } }),
 			undefined,
 		);
 	});
 
 	it("returns the job ID promptly with honest phase limits in the spawned text", async () => {
-		const { __test } = await import("../src/index.js");
-		const text = __test.spawnedJobResultText({
+		const { spawnClaudeAgentResultIsError, spawnedJobResultText } = await import("../src/spawn-claude-agent.js");
+		const text = spawnedJobResultText({
 			id: "claude-job-x9k2-1",
 			profile: "reviewer",
 			task: "review",

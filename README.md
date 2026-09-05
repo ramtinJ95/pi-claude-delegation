@@ -224,7 +224,10 @@ authority.
   chars of diff, 4k of status) with visible truncation markers and best-effort
   credential redaction, and it records which base/source it compares. Invalid
   refs and non-git directories fail the spawn instead of producing an empty
-  diff that would read as "no changes".
+  diff that would read as "no changes". Capture streams bounded prefixes, obeys
+  launch cancellation, and has a 30-second overall deadline. Omitted files are
+  still checked for Git failures; oversized Git metadata also fails the spawn.
+  External diff and text-conversion helpers are disabled.
 - The diff artifact is frozen at launch, but the job's Read/Glob/Grep calls see
   the live working tree, which may already contain later edits; the job's
   prompt says so explicitly.
