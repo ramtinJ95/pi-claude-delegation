@@ -12,17 +12,17 @@ import { formatRuntimeVersions, installedRuntimeVersions } from "./lib/runtime-v
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const packageJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 
-describe("Pi 0.84.2 baseline", () => {
+describe("Pi 0.86.1 minimum / 0.87.1 development baseline", () => {
 	it("pins matching Pi development packages and minimum peer versions", () => {
 		const versions = installedRuntimeVersions();
 		console.log(`    runtime: ${formatRuntimeVersions(versions)}`);
 		assert.deepEqual(
 			[versions.piAi, versions.piCodingAgent, versions.piTui],
-			["0.84.2", "0.84.2", "0.84.2"],
+			["0.87.1", "0.87.1", "0.87.1"],
 		);
 		for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) {
-			assert.equal(packageJson.devDependencies[name], "0.84.2");
-			assert.equal(packageJson.peerDependencies[name], ">=0.84.2");
+			assert.equal(packageJson.devDependencies[name], "0.87.1");
+			assert.equal(packageJson.peerDependencies[name], ">=0.86.1");
 		}
 		assert.equal(packageJson.engines.node, ">=22.19.0");
 	});

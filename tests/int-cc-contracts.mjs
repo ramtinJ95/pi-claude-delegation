@@ -35,6 +35,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { createSession, openSession, repairToolPairing } from "cc-session-io";
 import { formatRuntimeVersions } from "./lib/runtime-versions.mjs";
 import { ASKCLAUDE_READ_TOOLS } from "../src/query-policy.js";
+import { ASK_CLAUDE_DEFAULT_MODEL, ASK_CLAUDE_DEFAULT_THINKING } from "../src/delegation-options.js";
 
 console.log(`Runtime: ${formatRuntimeVersions()}`);
 
@@ -570,6 +571,22 @@ test("--strict-mcp-config suppresses filesystem MCP servers", { timeout: 120_000
 	const after = await initOnly({ ...base, extraArgs: { "strict-mcp-config": null } });
 	assert.deepEqual(after.mcp_servers ?? [], [],
 		`filesystem MCP servers survived --strict-mcp-config: ${JSON.stringify(after.mcp_servers)}`);
+});
+
+test("delegation default Opus 5.5 accepts high effort", { timeout: 120_000 }, async () => {
+	const { result } = await collect(query({
+		prompt: "Reply with just: OK",
+		options: providerOptions({
+			model: ASK_CLAUDE_DEFAULT_MODEL,
+			effort: ASK_CLAUDE_DEFAULT_THINKING,
+			maxTurns: 1,
+			persistSession: false,
+			extraArgs: { "strict-mcp-config": null, model: ASK_CLAUDE_DEFAULT_MODEL, "thinking-display": "summarized" },
+		}),
+	}));
+	assert.equal(result?.subtype, "success", `Delegation defaults failed: ${JSON.stringify(result)}`);
+	assert.ok(Object.keys(result.modelUsage ?? {}).some((model) => model.startsWith("claude-opus-5-5")),
+		`Expected Opus 5.5, got ${JSON.stringify(result.modelUsage)}`);
 });
 
 test("--thinking-display summarized is still an accepted flag value", { timeout: 120_000 }, async () => {

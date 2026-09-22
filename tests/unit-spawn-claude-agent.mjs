@@ -104,6 +104,32 @@ function execute(pi, params, { signal, ctx } = {}) {
 }
 
 describe("SpawnClaudeAgent adapter wiring", () => {
+	for (const execution of ["foreground", "background"]) {
+		for (const thinking of [undefined, "medium", "off"]) {
+			it(`${execution} defaults to Opus 5.5/high and preserves thinking=${thinking}`, async () => {
+				const { pi, jobs, runs, foregroundRuns } = wire();
+				const result = await execute(pi, { task: "explain", mode: "none", execution, thinking }, {
+					ctx: { model: { baseUrl: "anthropic" }, getSystemPrompt: () => "system" },
+				});
+				const run = execution === "foreground" ? foregroundRuns[0] : runs[0];
+				assert.equal(run.requestedModel, "claude-opus-5-5");
+				assert.equal(run.thinking, thinking ?? "high");
+				if (execution === "background") {
+					const record = jobs.get(result.details.jobId);
+					assert.equal(record.requestedModel, "claude-opus-5-5");
+					assert.equal(record.thinking, thinking ?? "high");
+				}
+			});
+		}
+	}
+
+	it("advertises the pinned model and effort defaults", () => {
+		const { pi } = wire();
+		const properties = pi.tools.get("SpawnClaudeAgent").parameters.properties;
+		assert.match(properties.model.description, /Default: "claude-opus-5-5"/);
+		assert.match(properties.thinking.description, /Default: "high"/);
+	});
+
 	it("registers nothing when the DelegateToClaude opt-in is off", () => {
 		const pi = fakePi();
 		registerSpawnClaudeAgent(pi, {

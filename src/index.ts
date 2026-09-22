@@ -1,11 +1,12 @@
 import { createSharedSessionSynchronizer, turnStart, type SessionState } from "./shared-session.js";
 import { createIsolatedSummaryStreamFn } from "./isolated-summary.js";
+import { toBridgeContext } from "./transcript.js";
 import { createForegroundDelegationExecutor, type ForegroundRunOptions } from "./foreground-delegation.js";
 import { registerSpawnClaudeAgent, spawnClaudeAgentToolName } from "./spawn-claude-agent.js";
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, generateBranchSummary, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, compact, generateBranchSummary, type BeforeAgentStartEvent, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, resolveSettings, type EffortLevel, type PermissionMode, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
@@ -37,7 +38,7 @@ import {
 	type AskClaudeResultDetails,
 } from "./askclaude-ui.js";
 import { assembleModelResult } from "./delegation-retention.js";
-import { ASK_CLAUDE_DEFAULT_MODEL, buildDelegationQueryOptions } from "./delegation-options.js";
+import { ASK_CLAUDE_DEFAULT_MODEL, ASK_CLAUDE_DEFAULT_THINKING, buildDelegationQueryOptions } from "./delegation-options.js";
 import { runDelegation, type DelegationRunResult } from "./delegation-runner.js";
 import type { AgentProfile } from "./agent-profiles.js";
 import { BackgroundJobManager } from "./background-jobs.js";
@@ -191,9 +192,9 @@ const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-delegation:activeStreamSimpl
 // payload nor the HTTP response, so the bridge cannot implement either hook's
 // replacement/observation contract faithfully. Keep this explicit and tested:
 // calling a hook with a made-up payload or response would be worse than an
-// honest compatibility limitation. See docs/PI-084-COMPATIBILITY.md.
+// honest compatibility limitation. See docs/PI-COMPATIBILITY.md.
 const PROVIDER_HOOK_SUPPORT = Object.freeze({
-	reviewedAgentSdk: "0.3.257",
+	reviewedAgentSdk: "0.3.280",
 	onPayload: false,
 	onResponse: false,
 });
@@ -421,6 +422,8 @@ export const __test = {
 	syncSharedSession,
 	extractUserPromptBlocks,
 	consumeQuery,
+	streamClaudeAgentSdk,
+	get promptCaptures() { return promptCaptures; },
 	finalizeCurrentStream,
 	resultErrorText,
 	deliverToolResults,
@@ -1154,6 +1157,12 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	showStartupNoticeOnce();
+	// Normalize before any prompt lookup, tool routing, or session cursor write.
+	context = toBridgeContext(context);
+	// Pi's completeSummarization marks all one-off summaries this way, including
+	// /bug, which has no takeover hook. They must not touch the live conversation
+	// or require a prompt capture from before_agent_start.
+	if (options?.cacheRetention === "none") return isolatedStreamFn(model, context, options);
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
@@ -1328,7 +1337,15 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			? { allowDangerouslySkipPermissions: true }
 			: {}),
 		includePartialMessages: true,
-		settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
+		// Git-status transitions change the preset's cached system prefix. Omit
+		// that snapshot here: Pi owns the tools, so CC's native Git guidance is
+		// unused. Native delegation keeps its Git guidance and settings unchanged.
+		// Ported from pi-claude-bridge deb1f31 (issue #73).
+		settings: {
+			...claudeCodeSettings(providerSettings),
+			claudeMdExcludes: CLAUDE_MD_EXCLUDES,
+			includeGitInstructions: false,
+		},
 		systemPrompt: {
 			type: "preset", preset: "claude_code",
 			append: systemPromptAppend ? systemPromptAppend : undefined,
@@ -1680,15 +1697,32 @@ export default function (pi: ExtensionAPI) {
 	// `--system-prompt` replaces pi's default rather than adding to it, but Claude
 	// Code's preset carries its own tool and permission guidance that the bridge
 	// still depends on, so both flags are forwarded as an append.
-	pi.on("before_agent_start", (event) => {
-		const options = event.systemPromptOptions;
+	let lastSystemPromptOptions: BeforeAgentStartEvent["systemPromptOptions"] | undefined;
+	function recordSystemPrompt(systemPrompt: string, options = lastSystemPromptOptions) {
+		// An opaque forced prompt is not a re-render of these portable inputs.
+		// Preserve the existing exact/inherited resolver: recording a wrapper
+		// under the old inputs would silently discard the wrapper's instructions.
+		if (options?.forceSystemPrompt !== undefined) return;
 		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
-		promptCaptures.record(event.systemPrompt, {
+		promptCaptures.record(systemPrompt, {
 			custom: options?.customPrompt,
 			append: options?.appendSystemPrompt,
 			contextFiles: options?.contextFiles ?? [],
 			skills: hasRead ? options?.skills ?? [] : [],
 		});
+	}
+	pi.on("before_agent_start", (event) => {
+		lastSystemPromptOptions = event.systemPromptOptions;
+		recordSystemPrompt(event.systemPrompt);
+	});
+	// Pi can widen the prompt after before_agent_start and re-render sections
+	// between turns. Capture those exact keys before transcript replay resolves
+	// them, retaining the portable inputs collected for the run.
+	pi.on("agent_start", (_event, ctx) => {
+		recordSystemPrompt(ctx.getSystemPrompt());
+	});
+	pi.on("turn_start", (_event, ctx) => {
+		recordSystemPrompt(ctx.getSystemPrompt());
 	});
 	pi.on("session_shutdown", () => {
 		reportLeaks("session_shutdown");
@@ -1828,8 +1862,8 @@ export default function (pi: ExtensionAPI) {
 		const askClaudeParams = Type.Object({
 			prompt: Type.String({ description: askContract.promptDescription }),
 			mode: Type.Optional(StringEnum(modeValues, { description: askContract.modeDescription })),
-			model: Type.Optional(Type.String({ description: 'Model name or ID. Default: "opus".' })),
-			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: "Thinking effort level. Omit to use Claude Code's default." })),
+			model: Type.Optional(Type.String({ description: `Model name or ID. Default: "${ASK_CLAUDE_DEFAULT_MODEL}".` })),
+			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: `Thinking effort level. Default: "${ASK_CLAUDE_DEFAULT_THINKING}".` })),
 			isolated: Type.Optional(Type.Boolean({ description: askContract.isolatedDescription })),
 		});
 		pi.registerTool<typeof askClaudeParams>({
@@ -1841,8 +1875,8 @@ export default function (pi: ExtensionAPI) {
 				let text = theme.fg("mdLink", theme.bold("DelegateToClaude "));
 				const tags = askClaudeContextTags(args, askContract);
 				tags.push(`permission=${askPermissionMode}`);
-				if (args.model) tags.push(`model=${args.model}`);
-				if (args.thinking) tags.push(`thinking=${args.thinking}`);
+				tags.push(`model=${args.model ?? ASK_CLAUDE_DEFAULT_MODEL}`);
+				tags.push(`thinking=${args.thinking ?? ASK_CLAUDE_DEFAULT_THINKING}`);
 				if (tags.length) text += `${theme.fg("accent", `[${tags.join(", ")}]`)} `;
 				const truncated = args.prompt.length > PREVIEW_MAX_CHARS ? args.prompt.substring(0, PREVIEW_MAX_CHARS) : args.prompt;
 				const lines = truncated.split("\n").slice(0, PREVIEW_MAX_LINES);
@@ -1873,7 +1907,7 @@ export default function (pi: ExtensionAPI) {
 				if (mode === "full" && !writeLeaseHandle) {
 					return {
 						content: [{ type: "text" as const, text: assembleModelResult({ answer: `Error: ${checkoutWriteConflictText(checkoutWriteLease)}` }) }],
-						details: { error: true, capabilityMode: mode, requestedModel: params.model ?? ASK_CLAUDE_DEFAULT_MODEL, thinking: params.thinking, isolated },
+						details: { error: true, capabilityMode: mode, requestedModel: params.model ?? ASK_CLAUDE_DEFAULT_MODEL, thinking: params.thinking ?? ASK_CLAUDE_DEFAULT_THINKING, isolated },
 					};
 				}
 				try {
@@ -1884,7 +1918,7 @@ export default function (pi: ExtensionAPI) {
 						mode,
 						isolated,
 						requestedModel: params.model ?? ASK_CLAUDE_DEFAULT_MODEL,
-						thinking: params.thinking,
+						thinking: params.thinking ?? ASK_CLAUDE_DEFAULT_THINKING,
 						signal,
 						onUpdate,
 						systemPrompt: ctx.getSystemPrompt(),

@@ -10,7 +10,7 @@ import type { DelegationRunResult } from "./delegation-runner.js";
 import { errorMessage, type DelegationSnapshot } from "./delegation-events.js";
 import { DEFAULT_PERMISSION_MODE, type CapabilityMode } from "./query-policy.js";
 import { assembleModelResult } from "./delegation-retention.js";
-import { ASK_CLAUDE_DEFAULT_MODEL } from "./delegation-options.js";
+import { ASK_CLAUDE_DEFAULT_MODEL, ASK_CLAUDE_DEFAULT_THINKING } from "./delegation-options.js";
 import { renderAskClaudeResult, PREVIEW_MAX_CHARS, PREVIEW_MAX_LINES, type AskClaudeResultDetails } from "./askclaude-ui.js";
 import type { ForegroundDelegationResult } from "./foreground-delegation.js";
 
@@ -178,8 +178,8 @@ export function registerSpawnClaudeAgent(pi: Pick<ExtensionAPI, "registerTool" |
 		user_requested: Type.Optional(Type.Boolean({ description: "Required true for full mode; set only for explicit user-requested implementation delegation." })),
 		execution: Type.Optional(StringEnum(["foreground", "background"] as const, { description: '"background" (default): return a job ID now and deliver the result later. "foreground": block and return the result directly.' })),
 		isolated: Type.Optional(Type.Boolean({ description: "Foreground only. true (default): fresh session. false: include Pi history. Background is always isolated." })),
-		model: Type.Optional(Type.String({ description: 'Model name or ID. Default: "opus".' })),
-		thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: "Thinking effort level. Omit to use Claude Code's default." })),
+		model: Type.Optional(Type.String({ description: `Model name or ID. Default: "${ASK_CLAUDE_DEFAULT_MODEL}".` })),
+		thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: `Thinking effort level. Default: "${ASK_CLAUDE_DEFAULT_THINKING}".` })),
 	});
 	pi.registerTool<typeof spawnClaudeAgentParams>({
 		name: spawnClaudeAgentToolName,
@@ -199,7 +199,7 @@ export function registerSpawnClaudeAgent(pi: Pick<ExtensionAPI, "registerTool" |
 			if (args.user_requested) tags.push("user-requested");
 			if (args.isolated !== undefined) tags.push(args.isolated ? "isolated" : "shared");
 			tags.push(`model=${args.model ?? ASK_CLAUDE_DEFAULT_MODEL}`);
-			if (args.thinking) tags.push(`thinking=${args.thinking}`);
+			tags.push(`thinking=${args.thinking ?? ASK_CLAUDE_DEFAULT_THINKING}`);
 			if (args.review?.base) tags.push(`base=${args.review.base}`);
 			text += `${theme.fg("accent", `[${tags.join(", ")}]`)} `;
 			const truncated = args.task.length > PREVIEW_MAX_CHARS ? args.task.substring(0, PREVIEW_MAX_CHARS) : args.task;
@@ -237,7 +237,7 @@ export function registerSpawnClaudeAgent(pi: Pick<ExtensionAPI, "registerTool" |
 			}
 			const spawnError = (text: string): { content: { type: "text"; text: string }[]; details: SpawnClaudeAgentResultDetails } => ({
 				content: [{ type: "text" as const, text: assembleModelResult({ answer: `Error: ${text}` }) }],
-				details: { error: true, ...(mode ? { mode } : {}), ...(profile ? { profile: profile.id } : {}), requestedModel, thinking: params.thinking },
+				details: { error: true, ...(mode ? { mode } : {}), ...(profile ? { profile: profile.id } : {}), requestedModel, thinking: params.thinking ?? ASK_CLAUDE_DEFAULT_THINKING },
 			});
 
 			if (ctx.model?.baseUrl === "claude-delegation") {
@@ -334,7 +334,7 @@ export function registerSpawnClaudeAgent(pi: Pick<ExtensionAPI, "registerTool" |
 							prompt,
 							profile,
 							requestedModel,
-							thinking: params.thinking,
+							thinking: params.thinking ?? ASK_CLAUDE_DEFAULT_THINKING,
 							isolated,
 							cwd,
 							signal,
@@ -354,13 +354,13 @@ export function registerSpawnClaudeAgent(pi: Pick<ExtensionAPI, "registerTool" |
 					profile: profile.id,
 					task: params.task,
 					requestedModel,
-					thinking: params.thinking,
+					thinking: params.thinking ?? ASK_CLAUDE_DEFAULT_THINKING,
 					launch,
 					execute: (run) => deps.runJob({
 						prompt,
 						profile,
 						requestedModel,
-						thinking: params.thinking,
+						thinking: params.thinking ?? ASK_CLAUDE_DEFAULT_THINKING,
 						cwd,
 						signal: run.signal,
 						onSnapshot: run.onSnapshot,

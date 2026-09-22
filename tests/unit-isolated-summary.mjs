@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { createIsolatedSummaryStreamFn } from "../src/isolated-summary.js";
+import { __test } from "../src/index.js";
 
 const model = { id: "test", api: "test", provider: "test" };
 const context = { messages: [{ role: "user", content: "summarize" }], systemPrompt: "summary instructions" };
@@ -26,6 +27,49 @@ async function summarize(messages, overrides = {}, signal) {
 }
 
 describe("isolated summary lifecycle", () => {
+	it("recovers summary instructions from Pi transcript system messages", async () => {
+		let queryInput;
+		const streamFn = createIsolatedSummaryStreamFn({
+			createStream: createAssistantMessageEventStream,
+			resolveOptions: (_model, context) => ({ systemPrompt: context.systemPrompt, tools: [], persistSession: false }),
+			queryFactory: (input) => {
+				queryInput = input;
+				return {
+					async *[Symbol.asyncIterator]() { yield success("complete summary"); },
+					async interrupt() {}, close() {},
+				};
+			},
+		});
+		const result = await streamFn(model, { messages: [
+			{ role: "system", content: "summary instructions", timestamp: 0 },
+			{ role: "system", content: "", sections: { rules: "be brief" }, timestamp: 1 },
+			...context.messages,
+		] }, { cacheRetention: "none" }).result();
+		assert.equal(result.stopReason, "stop");
+		assert.equal(queryInput.prompt, "summarize");
+		assert.equal(queryInput.options.systemPrompt, "summary instructions\n\nbe brief");
+		assert.equal(queryInput.options.persistSession, false);
+	});
+
+	it("routes one-off provider summaries before capture/session handling and honors cancellation", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const state = { sessionId: "parent", cursor: 42, cwd: "/repo" };
+		__test.setSharedSession(state);
+		try {
+			// No before_agent_start recorded this prompt: reaching capture lookup
+			// would throw, and reaching session sync would disturb the parent.
+			const result = await __test.streamClaudeAgentSdk(model, { messages: [
+				{ role: "system", content: "uncaptured bug-report instructions", timestamp: 0 },
+				...context.messages,
+			] }, { cacheRetention: "none", signal: controller.signal }).result();
+			assert.equal(result.stopReason, "aborted");
+			assert.deepEqual(__test.getSharedSession(), state);
+		} finally {
+			__test.resetSharedSession();
+		}
+	});
+
 	it("preserves structured setup errors instead of displaying [object Object]", async () => {
 		const { terminal } = await summarize([], { resolveOptions: () => { throw { message: "invalid settings" }; } });
 		assert.equal(terminal.error.errorMessage, "invalid settings");

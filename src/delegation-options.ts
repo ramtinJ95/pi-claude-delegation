@@ -5,7 +5,8 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { DelegationPolicy } from "./query-policy.js";
 
-export const ASK_CLAUDE_DEFAULT_MODEL = "opus";
+export const ASK_CLAUDE_DEFAULT_MODEL = "claude-opus-5-5";
+export const ASK_CLAUDE_DEFAULT_THINKING = "high";
 
 interface DelegationQueryOptionsCommon {
 	policy: DelegationPolicy;

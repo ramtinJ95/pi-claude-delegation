@@ -3,6 +3,7 @@ import { query, type Options, type SDKAssistantMessageError, type SDKResultMessa
 import { messageContentToText } from "./convert.js";
 import { assertSdkResultReceived, errorMessage, sdkResultErrorText as resultErrorText } from "./delegation-events.js";
 import type { DelegationQuery, DelegationQueryFactory } from "./delegation-runner.js";
+import { toBridgeContext } from "./transcript.js";
 
 interface SummaryDependencies {
 	createStream: () => AssistantMessageEventStream;
@@ -67,6 +68,10 @@ async function runIsolatedSummary(
 	};
 
 	try {
+		// Compaction, branch, and one-off summaries carry their instructions in
+		// transcript system messages on Pi 0.86+. Keep the strict user-prompt
+		// invariant after normalization; malformed summaries must fail explicitly.
+		context = toBridgeContext(context);
 		const promptText = extractIsolatedSummaryPrompt(context.messages);
 		if (options?.signal?.aborted) onAbort();
 		else sdkQuery = (deps.queryFactory ?? query)({ prompt: promptText, options: deps.resolveOptions(model, context, options) });

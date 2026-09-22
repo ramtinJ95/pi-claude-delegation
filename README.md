@@ -22,7 +22,9 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 pi install npm:@ramtinj95/pi-claude-delegation
 ```
 
-This fork requires Pi 0.84.2 or newer and Node.js 22.19 or newer.
+This fork requires Pi 0.86.1 or newer and Node.js 22.19 or newer. Upgrade older Pi
+installations before installing this release. Development and integration tests
+use Pi 0.87.1.
 
 Version 0.1.0 has clean typecheck and unit/package validation. The manual
 Phase 3d dogfood checks for reload-time worker termination and checkout-write
@@ -66,8 +68,8 @@ You could also create skills or add something to AGENTS.md to e.g. "Always call 
 
 - **`prompt`** — the question or task for Claude Code
 - **`mode`** — `read` (default; model-callable tools are limited to Read, Glob, Grep, WebFetch, and WebSearch), `none` (no model-callable tools), or `full` (Claude Code's normal tools except unsupported interactive/lifecycle tools; disable with `allowFullMode: false`)
-- **`model`** — `opus` (default), `sonnet`, `haiku`, or a full model ID
-- **`thinking`** — effort level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
+- **`model`** — `claude-opus-5-5` (Opus 5.5, default), `opus`, `sonnet`, `haiku`, or another full model ID
+- **`thinking`** — effort level: `off`, `minimal`, `low`, `medium`, `high` (default), `xhigh`
 - **`isolated`** — when `true`, Claude gets a fresh conversation with no Pi history or persisted Claude session (default: `true`). This is conversation isolation, not a hermetic process: working-directory access, settings, sandbox, and managed policy still apply.
 
 While a call runs, DelegateToClaude streams Claude's response and a compact tool/action
@@ -352,7 +354,7 @@ this summary is exhaustive.
 
 `npm run test:unit` for offline tests (`tests/unit-*.mjs`: queue, import, skills). 
 
-The offline suite also launches the repository-local Pi 0.84.2 CLI to verify
+The offline suite also launches the repository-local Pi 0.87.1 CLI to verify
 that the extension loads and registers its provider. Test output records the
 installed Pi, Agent SDK, and bundled Claude Code versions.
 
@@ -372,12 +374,12 @@ When filing a bug about a session-resume failure (e.g. "No conversation found"),
 ## Known issues
 
 **Pi provider request/response hooks are not available through the Agent SDK.**
-Claude Bridge cannot faithfully implement Pi 0.84.2's `onPayload` replacement
+Claude Delegation cannot faithfully implement Pi's `onPayload` replacement
 or `onResponse` observation contracts because the Agent SDK exposes neither the
 final wire payload nor the underlying HTTP response. It does not fabricate
 either one. This means `before_provider_request` and `after_provider_response`
 extensions do not observe bridge traffic. See
-[Pi 0.84 compatibility baseline](docs/PI-084-COMPATIBILITY.md).
+[Pi compatibility baseline](docs/PI-COMPATIBILITY.md).
 
 **Sessions get rebuilt more often than they need to be, and a rebuild is expensive.** The bridge rewrites Claude Code's session from pi's history whenever pi's messages move underneath it — after an abort, `/compact`, tree navigation, or an API error. Measured over this repo's own bridge log, a rebuild boundary loses the prompt cache roughly 58% of the time against 26% for a plain resume, so an abort-heavy session costs noticeably more than a clean one. Aborts alone are 46% of rebuilds.
 

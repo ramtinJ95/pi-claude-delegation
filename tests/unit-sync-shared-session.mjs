@@ -17,6 +17,44 @@ describe("syncSharedSession", () => {
 		__test.setPiUI(null);
 	});
 
+	it("takes the clean-start path when transcript system state precedes the first user", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-transcript-"));
+		try {
+			const result = __test.syncSharedSession([
+				{ role: "system", content: "instructions", timestamp: 0 },
+				{ role: "user", content: "hello", timestamp: 1 },
+			], cwd);
+			assert.equal(result.sessionId, null);
+			assert.equal(__test.getSharedSession(), null);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("does not inflate the cursor or rebuild when system updates punctuate history", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-transcript-"));
+		const sessionId = randomUUID();
+		try {
+			const seeded = createSession({ sessionId, projectPath: cwd });
+			seeded.importMessages([{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "text", text: "hello" }] }]);
+			seeded.save();
+			__test.setSharedSession({ sessionId, cursor: 2, cwd });
+			const result = __test.syncSharedSession([
+				{ role: "system", content: "instructions", timestamp: 0 },
+				{ role: "user", content: "hi", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "text", text: "hello" }], timestamp: 2 },
+				{ role: "system", content: "", sections: { rules: "updated" }, timestamp: 3 },
+				{ role: "user", content: "next", timestamp: 4 },
+			], cwd);
+			assert.equal(result.sessionId, sessionId);
+			assert.equal(__test.getSharedSession().cursor, 2);
+			assert.deepEqual(openSession({ sessionId, projectPath: cwd }).messages.map((m) => m.type), ["user", "assistant"]);
+		} finally {
+			deleteSession(sessionId, cwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	// The branch this exercises is the guard that stops a reentrant subagent from
 	// resuming — and then overwriting — the parent's session: a subagent's context
 	// is shorter than the parent's cursor, so it starts fresh and the parent's

@@ -1,4 +1,5 @@
 import type { Context } from "@earendil-works/pi-ai";
+import { nonSystemMessages } from "./transcript.js";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { convertPiMessages } from "./convert.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
@@ -155,7 +156,10 @@ export function createSharedSessionSynchronizer(deps: SessionSyncDependencies) {
 		customToolNameToSdk?: Map<string, string>,
 		modelId?: string,
 	): SyncResult {
-		const priorMessages = messages.slice(0, turnStart(messages)); // everything before the current user turn
+		// Pi transcript system updates are prompt/tool state, not session history.
+		// Shared delegation can reach here without the provider entry-point adapter.
+		const history = nonSystemMessages(messages);
+		const priorMessages = history.slice(0, turnStart(history));
 
 		// REUSE path
 		//
@@ -199,7 +203,7 @@ export function createSharedSessionSynchronizer(deps: SessionSyncDependencies) {
 
 		// REBUILD path
 		if (priorMessages.length === 0) {
-			debug(`Case 1: clean start, ${messages.length} total messages`);
+			debug(`Case 1: clean start, ${history.length} total messages`);
 			debug(`syncResult: path=clean-start`);
 			return { sessionId: null };
 		}

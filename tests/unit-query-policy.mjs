@@ -24,6 +24,19 @@ function topLevelFunctionSource(source, name) {
 }
 
 describe("Claude query permission policy", () => {
+	it("omits Git instructions only on the provider path to keep its prompt cache stable", () => {
+		const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+		const provider = topLevelFunctionSource(source, "streamClaudeAgentSdk");
+		assert.match(provider, /settings:\s*\{[^}]*includeGitInstructions:\s*false/s);
+		assert.match(provider, /tools:\s*\[\]/);
+		const delegation = topLevelFunctionSource(source, "delegationQueryInputs");
+		assert.doesNotMatch(delegation, /includeGitInstructions/,
+			"native Claude delegation must retain its Git guidance");
+		const config = readFileSync(new URL("../src/config.ts", import.meta.url), "utf8");
+		assert.doesNotMatch(topLevelFunctionSource(config, "claudeCodeSettings"), /includeGitInstructions/,
+			"shared settings must not disable Git guidance for delegation");
+	});
+
 	it("defaults every query path to auto", () => {
 		assert.equal(DEFAULT_PERMISSION_MODE, "auto");
 		assert.equal(resolveProviderPermissionPolicy().permissionMode, "auto");
