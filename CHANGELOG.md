@@ -4,7 +4,7 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
-## UNRELEASED
+## 0.1.6 — 2026-09-22
 
 - **Bump: require Pi 0.86.1 and test on 0.87.1** — Port upstream's transcript compatibility: replay prompt sections and tool deltas at provider/summary boundaries, refresh captured prompts at agent/turn start, and keep system messages out of Claude Code session history and cursor counts. Route Pi's one-off summaries, including `/bug`, through the non-persistent summary executor. Older Pi installations must upgrade before using this release.
 - **Fix: pin delegation defaults to Opus 5.5 with high effort** — `DelegateToClaude` and foreground/background `SpawnClaudeAgent` calls now default to `claude-opus-5-5` and `high` thinking effort. Upgrade the Agent SDK to `^0.3.280` for the required Claude Code runtime. Explicit model and effort overrides remain supported; tool descriptions and call tags show the effective defaults.
