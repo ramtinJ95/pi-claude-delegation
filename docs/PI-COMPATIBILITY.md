@@ -9,9 +9,13 @@ helpers used by the adapter require the 0.86.1 floor; the old 0.84.2 baseline is
 no longer supported.
 
 The offline unit suite launches the repository-local Pi CLI in an isolated
-temporary agent directory, loads `src/index.ts`, and verifies that the
+temporary agent directory, loads a copy of the extension outside the checkout
+with only its runtime dependencies (no Pi devDependencies), and verifies that the
 `claude-delegation` models are registered. Test output also records the installed Pi
 packages, Agent SDK, and the Claude Code version bundled by that SDK.
+
+Import transcript helpers from `@earendil-works/pi-ai`: Pi supplies that package
+root to extensions, but not the `utils/transcript` or `utils/text` subpaths.
 
 ## Transcript and summary adaptation
 

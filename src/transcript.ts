@@ -1,6 +1,5 @@
 import type { Context, SystemMessage } from "@earendil-works/pi-ai";
-import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { getSystemMessageText } from "@earendil-works/pi-ai/utils/text";
+import { getCurrentSystemMessage, getSystemMessageText } from "@earendil-works/pi-ai";
 
 // Pi 0.86+ sends prompt sections and tool deltas inside transcript system
 // messages. Collapse them at the bridge boundary; CC session cursors and

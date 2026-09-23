@@ -2,9 +2,10 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { formatRuntimeVersions, installedRuntimeVersions } from "./lib/runtime-versions.mjs";
@@ -27,11 +28,24 @@ describe("Pi 0.86.1 minimum / 0.87.1 development baseline", () => {
 		assert.equal(packageJson.engines.node, ">=22.19.0");
 	});
 
-	it("loads the extension and registers its provider in the local Pi CLI", () => {
+	it("loads the distributed extension using only host-supplied Pi modules", () => {
 		const scratch = mkdtempSync(join(tmpdir(), "pi-claude-delegation-load-"));
 		try {
 			const pi = join(ROOT, "node_modules/.bin/pi");
-			const extension = join(ROOT, "src/index.ts");
+			// Copy, don't symlink, the extension outside the checkout: local Pi
+			// devDependencies otherwise hide imports the bundled loader cannot supply.
+			const installed = join(scratch, "extension");
+			mkdirSync(installed);
+			cpSync(join(ROOT, "package.json"), join(installed, "package.json"));
+			cpSync(join(ROOT, "src"), join(installed, "src"), { recursive: true });
+			for (const name of Object.keys(packageJson.dependencies)) {
+				const target = join(installed, "node_modules", name);
+				mkdirSync(dirname(target), { recursive: true });
+				symlinkSync(join(ROOT, "node_modules", name), target, "dir");
+			}
+			const extension = join(installed, "src/index.ts");
+			const require = createRequire(extension);
+			assert.throws(() => require.resolve("@earendil-works/pi-ai"), { code: "MODULE_NOT_FOUND" });
 			const result = spawnSync(pi, [
 				"--offline",
 				"--no-extensions",
