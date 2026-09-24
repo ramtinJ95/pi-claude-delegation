@@ -8,6 +8,7 @@ upstream history under the MIT license.
 
 - **Fix: turns no longer hang after a stalled response stream** — When Claude Code abandons a stalled stream and repeats the request without streaming, deliver that fallback message and drop the dead stream's partial blocks instead of discarding the fallback, which left its tool calls unanswered until the user aborted. Ported from pi-claude-bridge 5919fff.
 - **Fix: name rate-limit failures and correct rate-limit notices** — Prefix a failure that follows a rate-limit rejection with "Claude rate limit" so pi-subagents' `fallbackModels` and similar retry logic recognize it, read `resetsAt` as Unix seconds instead of milliseconds, show `utilization` as a percentage, and warn again only when usage crosses a new 5% step. Ported from pi-claude-bridge d8f42ee and 44fe582.
+- **Add: Claude Opus 5.5 provider model** — Register `claude-opus-5-5` (1M context, requested as `claude-opus-5-5[1m]`), which also lets the Opus 5.5 delegation default resolve to a known model instead of passing through as a bare unregistered ID. Model lookup now prefers an exact ID before partial matches, so `claude-opus-5` still selects Opus 5 while the `opus` shortcut now selects Opus 5.5. Ported from pi-claude-bridge 5919fff and 09f186e.
 
 ## 0.1.7 — 2026-09-23
 

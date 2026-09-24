@@ -172,8 +172,19 @@ describe("applyLongContext", () => {
 describe("resolveModel", () => {
 	const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
 
-	it("opus shortcut resolves to claude-opus-5 (first opus in order)", () => {
-		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5");
+	it("opus shortcut resolves to claude-opus-5-5 (first opus in order)", () => {
+		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5-5");
+	});
+
+	it("an exact ID wins over a longer ID that contains it", () => {
+		assert.equal(resolveModel(models, "claude-opus-5")?.id, "claude-opus-5");
+		assert.equal(resolveModel(models, "claude-opus-5-5")?.id, "claude-opus-5-5");
+	});
+
+	it("the delegation default resolves to a registered model and requests 1M", () => {
+		const model = resolveModel(models, "claude-opus-5-5");
+		assert.equal(model?.id, "claude-opus-5-5");
+		assert.deepEqual(resolveClaudeCodeRuntimeModel(model.id, PRO), { cliModelId: "claude-opus-5-5[1m]", contextWindow: 1000000 });
 	});
 
 	it("resolves every Fable shortcut and stale ID to Fable 5.1", () => {
@@ -202,7 +213,7 @@ describe("resolveModel", () => {
 	it("returns the matched model object for CLI-arg conversion", () => {
 		const oneMModels = buildModels(MODEL_IDS_IN_ORDER.map(oneM));
 		const model = resolveModel(oneMModels, "opus");
-		assert.equal(model.id, "claude-opus-5");
-		assert.equal(claudeCodeModelId(model, PRO), "claude-opus-5[1m]");
+		assert.equal(model.id, "claude-opus-5-5");
+		assert.equal(claudeCodeModelId(model, PRO), "claude-opus-5-5[1m]");
 	});
 });
