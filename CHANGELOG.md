@@ -4,6 +4,10 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
+## UNRELEASED
+
+- **Fix: turns no longer hang after a stalled response stream** — When Claude Code abandons a stalled stream and repeats the request without streaming, deliver that fallback message and drop the dead stream's partial blocks instead of discarding the fallback, which left its tool calls unanswered until the user aborted. Ported from pi-claude-bridge 5919fff.
+
 ## 0.1.7 — 2026-09-23
 
 - **Fix: load transcript helpers in installed extensions** — Import replay and text helpers from Pi's host-supplied package root instead of unavailable utility subpaths. Exercise extension startup outside the checkout without Pi devDependencies so the bundled-loader regression cannot hide behind local module resolution.
