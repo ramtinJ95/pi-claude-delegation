@@ -46,11 +46,11 @@ the old config automatically:
 
 ## Provider
 
-Use `/model` to select `claude-delegation/claude-fable-5-1`, `claude-delegation/claude-opus-5`, `claude-delegation/claude-opus-4-8`, `claude-delegation/claude-opus-4-7`, `claude-delegation/claude-opus-4-6`, `claude-delegation/claude-sonnet-5`, `claude-delegation/claude-sonnet-4-6`, or `claude-delegation/claude-haiku-4-5`. The `fable` shortcut and stale `claude-fable-5` requests are forced to Fable 5.1; this package no longer invokes Fable 5.
+Use `/model` to select `claude-delegation/claude-fable-5-1`, `claude-delegation/claude-opus-5-5`, `claude-delegation/claude-opus-5`, `claude-delegation/claude-opus-4-8`, `claude-delegation/claude-opus-4-7`, `claude-delegation/claude-opus-4-6`, `claude-delegation/claude-sonnet-5`, `claude-delegation/claude-sonnet-4-6`, or `claude-delegation/claude-haiku-4-5`. The `fable` shortcut and stale `claude-fable-5` requests are forced to Fable 5.1; this package no longer invokes Fable 5.
 
 Behind the scenes, pi's tools are bridged to Claude Code but it should all work like normal in pi. Bash commands get a 120-second default timeout (matching Claude Code's default) since pi's bash has no timeout by default. Skills in pi are copied over to Claude Code's system prompt so should work as they would with any other pi provider. Steering works mid-turn: a message sent while Claude is running a tool reaches it at that tool boundary, not after the whole turn finishes.
 
-**1M Context:** Opus 5, Opus 4.8, and Opus 4.7 get 1M context by default. Opus 4.6 only gets 1M if you're on a Max plan or pay for Extra Usage. Sonnet 4.6 only gets 1M if you pay for Extra Usage. You will need to set `provider.plan` and/or `provider.longContextExtraUsage` for 1M context in Opus 4.6/Sonnet 4.6 as described in [Configuration](#configuration).
+**1M Context:** Opus 5.5, Opus 5, Opus 4.8, and Opus 4.7 get 1M context by default. Opus 4.6 only gets 1M if you're on a Max plan or pay for Extra Usage. Sonnet 4.6 only gets 1M if you pay for Extra Usage. You will need to set `provider.plan` and/or `provider.longContextExtraUsage` for 1M context in Opus 4.6/Sonnet 4.6 as described in [Configuration](#configuration).
 
 ## DelegateToClaude Tool
 

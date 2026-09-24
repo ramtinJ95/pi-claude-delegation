@@ -59,6 +59,81 @@ describe("resultErrorText", () => {
 	});
 });
 
+// pi carries a failure only as errorMessage text, so every consumer that reacts to a rate
+// limit pattern-matches it. These mirror pi-subagents' gate (model-fallback.ts): one pattern
+// from its retryable list, and the tool-failure shape it refuses to retry.
+const RETRYABLE = /rate\s*limit/i;
+const TOOL_FAILURE_PREFIX = /^[\w.:@/-]+ failed (?:(?:\(exit \d+\):)|(?:with exit code \d+))(?:\s|$)/i;
+
+describe("a rate-limited failure", () => {
+	// Claude Code words a subscription limit with none of the vocabulary anyone matches on,
+	// and sends the rejection as its own message just before the failure it caused.
+	const rejection = {
+		type: "rate_limit_event",
+		rate_limit_info: { status: "rejected", resetsAt: 1786141800, rateLimitType: "five_hour" },
+	};
+	const limitResult = {
+		type: "result", subtype: "success", is_error: true,
+		result: "You're out of extra usage · resets 6:30pm (America/New_York)",
+	};
+
+	it("is named as a rate limit so fallback chains fire", async () => {
+		const c = makeCtx();
+		await consume(c, [rejection, limitResult]);
+
+		assert.match(c.turnOutput.errorMessage, RETRYABLE);
+		assert.doesNotMatch(c.turnOutput.errorMessage, TOOL_FAILURE_PREFIX);
+		assert.ok(c.turnOutput.errorMessage.includes(limitResult.result), "keeps Claude Code's own wording");
+		assert.ok(c.turnOutput.errorMessage.includes("five_hour"));
+	});
+
+	it("labels only the failure it caused, not a later one", async () => {
+		const c = makeCtx();
+		await consume(c, [rejection, limitResult, errorResult]);
+
+		assert.strictEqual(c.turnOutput.errorMessage, errorResult.result);
+	});
+
+	it("leaves an unrelated failure alone", async () => {
+		const c = makeCtx();
+		await consume(c, [errorResult]);
+		assert.strictEqual(c.turnOutput.errorMessage, errorResult.result);
+	});
+});
+
+describe("rate-limit notifications", () => {
+	function withNotifications(run) {
+		const notices = [];
+		__test.setPiUI({ notify: (text) => notices.push(text) });
+		return run(notices).finally(() => __test.setPiUI(null));
+	}
+	const warning = (utilization, surpassedThreshold = 0.75) => ({
+		type: "rate_limit_event",
+		rate_limit_info: { status: "allowed_warning", utilization, surpassedThreshold, rateLimitType: "five_hour" },
+	});
+
+	// resetsAt is Unix seconds (recorded streams carry values like 1785379800); reading it
+	// as milliseconds put every reset in January 1970.
+	it("reads resetsAt as Unix seconds", () => withNotifications(async (notices) => {
+		await consume(makeCtx(), [{ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1786141800, rateLimitType: "five_hour" } }]);
+		assert.deepStrictEqual(notices, [`Claude rate limited (five_hour) — resets at ${new Date(1786141800 * 1000).toLocaleTimeString()}`]);
+	}));
+
+	it("reports utilization as a percentage and only re-warns on a new 5% step", () => withNotifications(async (notices) => {
+		await consume(makeCtx(), [warning(0.8), warning(0.81), warning(0.84), warning(0.86)]);
+		assert.deepStrictEqual(notices, [
+			"Claude rate limit warning: 80% used (five_hour)",
+			"Claude rate limit warning: 86% used (five_hour)",
+		]);
+	}));
+
+	it("re-arms the warning once the window resets", () => withNotifications(async (notices) => {
+		const allowed = { type: "rate_limit_event", rate_limit_info: { status: "allowed", rateLimitType: "five_hour" } };
+		await consume(makeCtx(), [warning(0.8), allowed, warning(0.8)]);
+		assert.strictEqual(notices.length, 2);
+	}));
+});
+
 describe("error results", () => {
 	it("marks the turn errored and finalizes with an error event", async () => {
 		const c = makeCtx();

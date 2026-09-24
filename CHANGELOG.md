@@ -4,6 +4,13 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
+## UNRELEASED
+
+- **Fix: turns no longer hang after a stalled response stream** — When Claude Code abandons a stalled stream and repeats the request without streaming, deliver that fallback message and drop the dead stream's partial blocks instead of discarding the fallback, which left its tool calls unanswered until the user aborted. Ported from pi-claude-bridge 5919fff.
+- **Fix: name rate-limit failures and correct rate-limit notices** — Prefix a failure that follows a rate-limit rejection with "Claude rate limit" so pi-subagents' `fallbackModels` and similar retry logic recognize it, read `resetsAt` as Unix seconds instead of milliseconds, show `utilization` as a percentage, and warn again only when usage crosses a new 5% step. Ported from pi-claude-bridge d8f42ee and 44fe582.
+- **Add: Claude Opus 5.5 provider model** — Register `claude-opus-5-5` (1M context, requested as `claude-opus-5-5[1m]`), which also lets the Opus 5.5 delegation default resolve to a known model instead of passing through as a bare unregistered ID. Model lookup now prefers an exact ID before partial matches, so `claude-opus-5` still selects Opus 5 while the `opus` shortcut now selects Opus 5.5. Ported from pi-claude-bridge 5919fff and 09f186e.
+- **Fix: Claude provider in subagent sessions** — Share one prompt-capture registry across extension module instances, so a subagent that loads the extension again no longer fails its turn when the parent's stream function looks up a prompt only the subagent recorded. A later module instance also registers the provider into a session model registry that lacks it, instead of leaving `claude-delegation/*` models unavailable there, while still never overwriting a parent's registration. Ported from pi-claude-bridge 9ec8acf and a31dab3.
+
 ## 0.1.7 — 2026-09-23
 
 - **Fix: load transcript helpers in installed extensions** — Import replay and text helpers from Pi's host-supplied package root instead of unavailable utility subpaths. Exercise extension startup outside the checkout without Pi devDependencies so the bundled-loader regression cannot hide behind local module resolution.

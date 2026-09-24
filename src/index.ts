@@ -26,7 +26,7 @@ import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } f
 import {
 	collectPromptSkills,
 	projectPromptCapture,
-	PromptCaptures,
+	sharedPromptCaptures,
 } from "./prompt-capture.js";
 import { createToolServer } from "./mcp-server.js";
 import { askClaudeContextTags, buildAskClaudeContract } from "./askclaude-contract.js";
@@ -180,8 +180,9 @@ function diagDump(label: string, data: Record<string, unknown>) {
 // the subagent's `streamSimple` (which has empty state) instead of its own.
 //
 // By storing the active streamSimple in a Symbol.for() global (shared across all
-// module instances), we ensure only the FIRST instance to register takes effect.
-// Subsequent instances wrap the stored function instead of overwriting it.
+// module instances), only the FIRST instance registers at activation. Later
+// instances defer to session_start and register only into a session registry
+// that lacks the provider — see the registration block in the default export.
 //
 // On session_shutdown (including /reload), clearSession() resets this so a fresh
 // registration can occur for the next session.
@@ -526,8 +527,10 @@ function showStartupNoticeOnce(): void {
 }
 
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
-// is keyed rather than held in a single slot.
-const promptCaptures = new PromptCaptures();
+// is keyed rather than held in a single slot. One process-wide instance, shared
+// across every extension module instance: subagent sessions re-evaluate this
+// module, and the pinned stream they route through resolves against it.
+const promptCaptures = sharedPromptCaptures();
 
 /** Whatever a settled session left behind, named in one greppable line.
  *
@@ -685,6 +688,29 @@ function mapStopReason(reason: string | undefined): "stop" | "length" | "toolUse
 	}
 }
 
+/** SDK `resetsAt` is Unix seconds, not milliseconds. */
+function rateLimitResetTime(resetsAt: number): string {
+	return new Date(resetsAt * 1000).toLocaleTimeString();
+}
+
+/** Name a failure as a rate limit when a rejection preceded it.
+ *
+ *  pi has no typed rate-limit error — `stopReason` is only ever `"error"` and the sole carrier
+ *  is `errorMessage` — so everything that reacts to a rate limit pattern-matches that string:
+ *  pi-subagents gates `fallbackModels` on a pattern list, and key-rotating extensions use
+ *  their own. Claude Code words a subscription limit as "You're out of extra usage · resets
+ *  6:30pm", which matches none of them, so an exhausted quota reads as a fatal error and the
+ *  fallback chain never runs (pi-claude-bridge #58).
+ *
+ *  Leading with "Claude rate limit" rather than appending keeps the phrase in any truncated
+ *  render, and avoids the `<tool> failed (exit N):` shape that pi-subagents treats as a tool
+ *  failure and refuses to retry. */
+function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?: number }, failure: string): string {
+	const kind = rejection.rateLimitType ? ` (${rejection.rateLimitType})` : "";
+	const resets = rejection.resetsAt ? ` — resets ${rateLimitResetTime(rejection.resetsAt)}` : "";
+	return `Claude rate limit${kind}${resets}: ${failure}`;
+}
+
 function parsePartialJson(input: string, fallback: Record<string, unknown>): Record<string, unknown> {
 	if (!input) return fallback;
 	try { return JSON.parse(input); } catch { return fallback; }
@@ -755,7 +781,13 @@ function processStreamEvent(
 	const event = (message as SDKMessage & { event: any }).event;
 
 	if (event?.type === "message_start") {
+		// Still open from an earlier message_start: Claude Code gave up on that
+		// stream and is retrying it. Its blocks were never completed.
+		if (c.turnStreamOpen) dropAbandonedStreamBlocks(c, `restreamed as ${event.message?.id}`);
 		c.turnToolCallIds = [];
+		c.turnStreamMessageId = event.message?.id;
+		c.turnStreamOpen = true;
+		c.turnStreamBlockStart = c.turnBlocks.length;
 		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
 		return;
 	}
@@ -837,6 +869,8 @@ function processStreamEvent(
 		return;
 	}
 
+	if (event?.type === "message_stop") c.turnStreamOpen = false;
+
 	if (event?.type === "message_stop" && c.turnSawToolCall) {
 		// Tool call complete — end this pi stream. The SDK will still yield an
 		// assistant message for this turn, but currentPiStream=null causes
@@ -859,16 +893,47 @@ function processStreamEvent(
 	}
 }
 
+/** Remove the blocks a stream Claude Code abandoned mid-message. They never got a
+ *  message_stop, so a thinking block has no signature and a tool call is one CC will
+ *  never dispatch; left in, pi would run the tool and the turn would wait on a
+ *  handler that never comes, or the next request would replay a broken block.
+ *  The fallback then restarts those indices. pi's normal provider path tolerates that;
+ *  pi-agent-core's experimental harness frame encoder keys blocks by contentIndex and
+ *  rejects a repeated start, so it would need a change there to drive this provider.
+ *  Ported from pi-claude-bridge 5919fff. */
+function dropAbandonedStreamBlocks(c: QueryContext, why: string): void {
+	const dropped = c.turnBlocks.splice(c.turnStreamBlockStart);
+	debug(`dropAbandonedStreamBlocks: ${why}; dropped ${dropped.length} blocks from ${c.turnStreamMessageId} types=${dropped.map((b: any) => b.type).join(",")}`);
+	c.turnToolCallIds = [];
+	c.turnSawToolCall = c.turnBlocks.some((b: any) => b.type === "toolCall");
+	c.turnStreamOpen = false;
+}
+
 // The SDK always yields `assistant` messages (completed content blocks) after streaming.
 // When stream_events already delivered the content, this is a no-op. But after
 // resetTurnState (e.g. tool result delivery), if the next turn's assistant message
 // arrives before any stream_events, this is the primary content path. Must maintain
 // the same stream lifecycle as processStreamEvent — including ending the stream on
 // tool_use to prevent deadlock with the MCP handler.
+//
+// It is also the content path when a stream stalls: Claude Code drops it and asks
+// again without streaming ("Error streaming, falling back to non-streaming mode"),
+// and the answer arrives as one assistant message, under a new message id, with no
+// stream_events of its own. turnSawStreamEvent is already set by the dead stream,
+// so gating on it alone dropped that message: its tool calls never reached pi, CC
+// sat in the MCP handler waiting for their results, and the turn hung on "Working"
+// until the user aborted it.
 function processAssistantMessage(message: SDKMessage, model: Model<any>, customToolNameToPi: Map<string, string>, c: QueryContext): void {
-	if (c.turnSawStreamEvent) return;
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
+	if (c.turnSawStreamEvent) {
+		// Same id was already delivered; a new id is CC's non-streaming fallback.
+		// Drop the stalled stream's partial blocks if it never stopped. Deliberately
+		// deliver even if it stopped, at the risk of duplication if CC renumbers it.
+		const id = assistantMsg.id;
+		if (!id || !c.turnStreamMessageId || id === c.turnStreamMessageId) return;
+		if (c.turnStreamOpen) dropAbandonedStreamBlocks(c, `non-streaming fallback ${id}`);
+	}
 	c.turnToolCallIds = [];
 	debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 	for (const block of assistantMsg.content) {
@@ -975,6 +1040,12 @@ async function consumeQuery(
 			}
 			resultError = resultErrorText(message);
 			if (resultError !== undefined) {
+				// Consume the rejection alongside the failure it caused, so a later
+				// unrelated failure on this query doesn't inherit the label.
+				if (queryCtx.rateLimitRejection) {
+					resultError = describeRateLimitFailure(queryCtx.rateLimitRejection, resultError);
+					queryCtx.rateLimitRejection = null;
+				}
 				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "error";
@@ -986,10 +1057,30 @@ async function consumeQuery(
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
 			if (info?.status === "rejected") {
-				const resetsAt = info.resetsAt ? new Date(info.resetsAt).toLocaleTimeString() : "unknown";
+				// Held so the failure Claude Code sends next can be named as a rate limit.
+				queryCtx.rateLimitRejection = info;
+				// The "rate limited" notice below supersedes warnings; re-arm so the next
+				// window's warnings fire even if it opens straight into allowed_warning.
+				queryCtx.lastRateLimitWarnStep = null;
+				queryCtx.lastRateLimitWarnThreshold = undefined;
+				const resetsAt = info.resetsAt ? rateLimitResetTime(info.resetsAt) : "unknown";
 				piUI?.notify(`Claude rate limited (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`, "warning");
+			} else if (info?.status === "allowed") {
+				// Back under the threshold (window reset) — re-arm the warning dedupe.
+				queryCtx.lastRateLimitWarnStep = null;
+				queryCtx.lastRateLimitWarnThreshold = undefined;
 			} else if (info?.status === "allowed_warning") {
-				piUI?.notify(`Claude rate limit warning: ${Math.round(info.utilization ?? 0)}% used (${info.rateLimitType ?? ""})`, "warning");
+				// utilization is a fraction (0..1); allowed_warning fires once it crosses surpassedThreshold.
+				const percent = Math.round((info.utilization ?? 0) * 100);
+				// The SDK emits one event per request, so only re-notify when the level
+				// rises past a new 5% step or the threshold changes.
+				const step = Math.floor(percent / 5);
+				const rose = queryCtx.lastRateLimitWarnStep === null || step > queryCtx.lastRateLimitWarnStep;
+				if (rose || info.surpassedThreshold !== queryCtx.lastRateLimitWarnThreshold) {
+					queryCtx.lastRateLimitWarnStep = step;
+					queryCtx.lastRateLimitWarnThreshold = info.surpassedThreshold;
+					piUI?.notify(`Claude rate limit warning: ${percent}% used (${info.rateLimitType ?? ""})`, "warning");
+				}
 			}
 			continue;
 		}
@@ -1254,6 +1345,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// contextForToolResults — which now means pushing its steer into this
 	// query's stdin, not just mismatching a map.
 	queryCtx.turnToolCallIds = [];
+	// A rejection belongs to the query whose failure it explains; the reused
+	// top-level context must not hand it to the next query's unrelated failure.
+	queryCtx.rateLimitRejection = null;
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
 
@@ -1818,29 +1912,48 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Provider ---
 	//
-	// Guard against re-registration when the module is loaded multiple times
-	// (e.g., when spawning subagents). The shared ModelRegistry would otherwise
-	// overwrite the parent's streamSimple, breaking tool result delivery.
-	// See ACTIVE_STREAM_SIMPLE_KEY for the full mechanism.
+	// Registration policy across module instances (a subagent session can load
+	// this module fresh): the FIRST instance registers unconditionally at load,
+	// which is what puts claude-delegation models in the picker before any session
+	// starts. Later instances decide at session_start, when ctx.modelRegistry
+	// reveals who owns this session's registry:
+	//
+	// - Registry already has the provider (host passes the parent's registry down):
+	//   skip. Re-registering would overwrite the parent's pinned streamSimple with
+	//   this instance's fresh, empty-state stream fn, and the parent's next
+	//   tool-result delivery would route into it.
+	// - Registry lacks the provider (host gives the child its own): register, or
+	//   every claude-delegation/* dispatch in the child fails with "Model not found".
+	//
+	// A per-instance stream fn registered into a per-instance registry is
+	// self-consistent: that session's traffic flows through this module state,
+	// which starts clean and serves only that session. See ACTIVE_STREAM_SIMPLE_KEY.
+	// Ported from pi-claude-bridge a31dab3 (issue #91).
 
 	const g = globalThis as Record<symbol, any>;
+	const providerConfig = {
+		baseUrl: "claude-delegation",
+		apiKey: "not-used",
+		api: "claude-delegation",
+		models: registeredModels,
+		// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
+		streamSimple: streamClaudeAgentSdk as any,
+	};
 	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
 		// First instance: store our streamSimple and register.
 		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
-		pi.registerProvider(PROVIDER_ID, {
-			baseUrl: "claude-delegation",
-			apiKey: "not-used",
-			api: "claude-delegation",
-			models: registeredModels,
-			// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
-			streamSimple: streamClaudeAgentSdk as any,
-		});
+		pi.registerProvider(PROVIDER_ID, providerConfig);
 	} else {
-		// Subsequent instance (subagent session): skip registration entirely.
-		// The subagent already has access to claude-delegation models via the shared
-		// ModelRegistry from the parent's registration. Calls to those models
-		// route through the parent's streamSimple via reentrant QueryContexts.
-		debug(`provider: skipping re-registration, parent instance active (module=${moduleInstanceId})`);
+		// Later instance: register only if this session's registry lacks the provider.
+		debug(`provider: deferring registration decision to session_start (module=${moduleInstanceId})`);
+		pi.on("session_start", (_event, ctx) => {
+			if (ctx.modelRegistry.getProvider(PROVIDER_ID)) {
+				debug(`provider: registry already has ${PROVIDER_ID}, skipping registration (module=${moduleInstanceId})`);
+				return;
+			}
+			debug(`provider: registry lacks ${PROVIDER_ID}, registering (module=${moduleInstanceId})`);
+			pi.registerProvider(PROVIDER_ID, providerConfig);
+		});
 	}
 
 	// --- DelegateToClaude tool ---
