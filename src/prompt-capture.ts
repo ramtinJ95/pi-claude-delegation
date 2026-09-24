@@ -187,6 +187,19 @@ export class PromptCaptures {
 	}
 }
 
+const SHARED_CAPTURES_KEY = Symbol.for("claude-delegation:promptCaptures");
+
+/** One process-wide registry for every module instance. A subagent session that loads
+ *  this module fresh records its prompts from its own hooks, while its turns may still
+ *  route through the first instance's pinned stream fn; with a per-instance registry
+ *  that stream resolved against captures it never saw, and the turn threw
+ *  (pi-claude-bridge #64). Never cleared at session_shutdown: identical keys carry
+ *  identical portable parts, so cross-session reuse is safe. */
+export function sharedPromptCaptures(): PromptCaptures {
+	const globals = globalThis as Record<symbol, PromptCaptures | undefined>;
+	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures());
+}
+
 export function projectPromptCapture(
 	capture: PromptCapture,
 	options: { skillReadTool: SkillReadTool },
