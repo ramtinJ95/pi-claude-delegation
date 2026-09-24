@@ -7,6 +7,7 @@ upstream history under the MIT license.
 ## UNRELEASED
 
 - **Fix: turns no longer hang after a stalled response stream** — When Claude Code abandons a stalled stream and repeats the request without streaming, deliver that fallback message and drop the dead stream's partial blocks instead of discarding the fallback, which left its tool calls unanswered until the user aborted. Ported from pi-claude-bridge 5919fff.
+- **Fix: name rate-limit failures and correct rate-limit notices** — Prefix a failure that follows a rate-limit rejection with "Claude rate limit" so pi-subagents' `fallbackModels` and similar retry logic recognize it, read `resetsAt` as Unix seconds instead of milliseconds, show `utilization` as a percentage, and warn again only when usage crosses a new 5% step. Ported from pi-claude-bridge d8f42ee and 44fe582.
 
 ## 0.1.7 — 2026-09-23
 
