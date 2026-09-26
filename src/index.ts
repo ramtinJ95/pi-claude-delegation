@@ -438,6 +438,8 @@ export const __test = {
 	drainForAbort,
 	CC_CHILD_ENV,
 	PROVIDER_CLAUDE_MD_EXCLUDES,
+	resolveMcpTools,
+	providerExcludedToolNames,
 	buildMcpServers,
 	branchSummaryOutcome,
 	PROVIDER_HOOK_SUPPORT,
@@ -591,7 +593,14 @@ function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	return undefined;
 }
 
-function resolveMcpTools(context: Context, excludeToolName?: string): {
+/** The delegation tools are left out of the provider's tool list: both refuse to run
+ *  when the active provider is claude-delegation, so serving them only resent their
+ *  schemas on every request and offered the model a call that could only fail. */
+function providerExcludedToolNames(): ReadonlySet<string> {
+	return new Set([askClaudeToolName, spawnClaudeAgentToolName]);
+}
+
+function resolveMcpTools(context: Context, excludeToolNames: ReadonlySet<string> = new Set()): {
 	mcpTools: Tool[];
 	customToolNameToSdk: Map<string, string>;
 	customToolNameToPi: Map<string, string>;
@@ -603,7 +612,7 @@ function resolveMcpTools(context: Context, excludeToolName?: string): {
 	if (!context.tools) return { mcpTools, customToolNameToSdk, customToolNameToPi };
 
 	for (const tool of context.tools) {
-		if (tool.name === excludeToolName) continue;
+		if (excludeToolNames.has(tool.name)) continue;
 		const sdkName = `${MCP_TOOL_PREFIX}${tool.name}`;
 		mcpTools.push(tool);
 		customToolNameToSdk.set(tool.name, sdkName);
@@ -1332,7 +1341,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Resolved first: an unaccountable system prompt throws, and doing that before
 	// anything is claimed or reset leaves no half-built query behind — in particular
 	// no stream claimed on the shared context that nobody will ever end.
-	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
+	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, providerExcludedToolNames());
 	// Build from what Pi loaded for this run, so `--no-context-files` and
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
 	// custom override embeds its parent's assembled Pi prompt; recursive projection
