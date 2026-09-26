@@ -322,6 +322,7 @@ Config: `~/.pi/agent/claude-delegation.json` (global) or the project Pi config d
 - `longContextExtraUsage` — set to `true` to enable 1M context models even if they cost money through Extra Usage on your plan. It enables Sonnet 4.6 with 1M on every plan and Opus 4.6 with 1M on Pro. Not needed for Opus 4.7 or 4.8.
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
+- `promptCacheTtl` — `"5m"` or `"1h"` prompt cache TTL for every Claude Code query the extension runs. Unset keeps Claude Code's choice, which is 1h on a subscription. A 1h cache write bills at 2x base input and a 5m write at 1.25x, so 5m is cheaper when turns follow each other within five minutes and costs a full re-write of the context whenever a turn comes 5–60 minutes after the last one. `node diag/token-cost.mjs` replays your recorded sessions under both TTLs.
 - `permissionMode` — Claude Code permission policy for provider queries and isolated summaries (default `"auto"`). The bridge does not install a host callback that overrides denials; Claude settings and managed policy may therefore reject Pi MCP calls.
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
 

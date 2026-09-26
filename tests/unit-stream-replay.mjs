@@ -68,6 +68,16 @@ describe("replaying a recorded text-only turn", () => {
 	});
 });
 
+describe("cache-write TTL split", () => {
+	// The fixture's first request writes 3971 tokens, all under the 1h TTL Claude Code
+	// picks on a subscription. The split is what prices those writes at 2x, not 1.25x.
+	it("records the 1h share of cacheWrite next to it", async () => {
+		const { ctx } = await replay("parallel-tools");
+		assert.equal(ctx.turnOutput.usage.cacheWrite, 3971);
+		assert.equal(ctx.turnOutput.usage.cacheWrite1h, 3971);
+	});
+});
+
 describe("replaying a recorded single-tool turn", () => {
 	it("surfaces the tool call under its pi name and ends the turn on it", async () => {
 		const { ctx } = await replay("single-tool");

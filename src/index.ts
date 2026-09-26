@@ -110,6 +110,13 @@ const CC_CHILD_ENV = {
 // while rules need their own. Managed/policy memory is not excludable by design.
 const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/.claude/rules/**"];
 
+// Claude Code 2.1.281 also loads AGENTS.md as project memory. On the provider path
+// Pi already projects that file into the system prompt, so CC's copy arrived a
+// second time on every request, wrapped in its "OVERRIDE any default behavior"
+// preamble. Delegation keeps it: that path forwards no Pi context files, so CC's
+// own load is how a delegated Claude sees the project's AGENTS.md.
+const PROVIDER_CLAUDE_MD_EXCLUDES = [...CLAUDE_MD_EXCLUDES, "**/AGENTS.md"];
+
 // Ensure log directories exist when debug is enabled
 if (DEBUG) {
 	try {
@@ -195,7 +202,7 @@ const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-delegation:activeStreamSimpl
 // calling a hook with a made-up payload or response would be worse than an
 // honest compatibility limitation. See docs/PI-COMPATIBILITY.md.
 const PROVIDER_HOOK_SUPPORT = Object.freeze({
-	reviewedAgentSdk: "0.3.280",
+	reviewedAgentSdk: "0.3.281",
 	onPayload: false,
 	onResponse: false,
 });
@@ -430,6 +437,8 @@ export const __test = {
 	deliverToolResults,
 	drainForAbort,
 	CC_CHILD_ENV,
+	PROVIDER_CLAUDE_MD_EXCLUDES,
+	resolveMcpTools,
 	buildMcpServers,
 	branchSummaryOutcome,
 	PROVIDER_HOOK_SUPPORT,
@@ -583,7 +592,7 @@ function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	return undefined;
 }
 
-function resolveMcpTools(context: Context, excludeToolName?: string): {
+function resolveMcpTools(context: Context): {
 	mcpTools: Tool[];
 	customToolNameToSdk: Map<string, string>;
 	customToolNameToPi: Map<string, string>;
@@ -595,7 +604,9 @@ function resolveMcpTools(context: Context, excludeToolName?: string): {
 	if (!context.tools) return { mcpTools, customToolNameToSdk, customToolNameToPi };
 
 	for (const tool of context.tools) {
-		if (tool.name === excludeToolName) continue;
+		// Both delegation tools refuse to run under this provider, so serving them
+		// would only resend their schemas on every request for a call that must fail.
+		if (tool.name === askClaudeToolName || tool.name === spawnClaudeAgentToolName) continue;
 		const sdkName = `${MCP_TOOL_PREFIX}${tool.name}`;
 		mcpTools.push(tool);
 		customToolNameToSdk.set(tool.name, sdkName);
@@ -641,7 +652,11 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 
 // --- Usage helpers ---
 
-function updateUsage(output: AssistantMessage, usage: Record<string, number | undefined>, model: Model<any>): void {
+type SdkUsage = Record<string, number | undefined> & {
+	cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } | null;
+};
+
+function updateUsage(output: AssistantMessage, usage: SdkUsage, model: Model<any>): void {
 	if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
 	if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
 	if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
@@ -649,12 +664,18 @@ function updateUsage(output: AssistantMessage, usage: Record<string, number | un
 	// Claude Code may report reasoning/thinking tokens separately, while pi's Usage type does not model that field.
 	const reasoning = usage.reasoning_tokens ?? usage.thinking_tokens;
 	if (reasoning != null) (output.usage as typeof output.usage & { reasoning?: number }).reasoning = reasoning;
+	// A 1h cache write bills at 2x base input and a 5m one at 1.25x, and Claude Code
+	// picks the TTL itself. pi's Usage has one cacheWrite field, so the 1h share rides
+	// alongside it for diag/token-cost.mjs to price the writes it cannot tell apart.
+	const cacheWrite1h = usage.cache_creation?.ephemeral_1h_input_tokens;
+	if (cacheWrite1h != null) (output.usage as typeof output.usage & { cacheWrite1h?: number }).cacheWrite1h = cacheWrite1h;
 	output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 	calculateCost(model, output.usage);
 	const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
 	const cachePct = promptTokens > 0 ? Math.round(output.usage.cacheRead / promptTokens * 100) : 0;
 	const reasoningText = reasoning != null ? ` reasoning=${reasoning}` : "";
-	debug(`usage: in=${output.usage.input} out=${output.usage.output} cacheRead=${output.usage.cacheRead} cacheWrite=${output.usage.cacheWrite} total=${output.usage.totalTokens}${reasoningText} cachePct=${cachePct}% model=${model.id}`);
+	const ttlText = cacheWrite1h != null ? ` cacheWrite1h=${cacheWrite1h}` : "";
+	debug(`usage: in=${output.usage.input} out=${output.usage.output} cacheRead=${output.usage.cacheRead} cacheWrite=${output.usage.cacheWrite} total=${output.usage.totalTokens}${reasoningText} cachePct=${cachePct}% model=${model.id}${ttlText}`);
 }
 
 // Log the *served* context window reported by an SDK result message
@@ -1324,7 +1345,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Resolved first: an unaccountable system prompt throws, and doing that before
 	// anything is claimed or reset leaves no half-built query behind — in particular
 	// no stream claimed on the shared context that nobody will ever end.
-	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
+	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
 	// Build from what Pi loaded for this run, so `--no-context-files` and
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
 	// custom override embeds its parent's assembled Pi prompt; recursive projection
@@ -1437,7 +1458,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// Ported from pi-claude-bridge deb1f31 (issue #73).
 		settings: {
 			...claudeCodeSettings(providerSettings),
-			claudeMdExcludes: CLAUDE_MD_EXCLUDES,
+			claudeMdExcludes: PROVIDER_CLAUDE_MD_EXCLUDES,
 			includeGitInstructions: false,
 		},
 		systemPrompt: {

@@ -37,6 +37,10 @@ export interface Config {
 		// Anthropic billing). Enables Sonnet 4.6 [1m] on every plan and Opus 4.6
 		// [1m] on Pro.
 		longContextExtraUsage?: boolean;
+		/** Prompt cache TTL for every Claude Code query the extension runs. Unset keeps
+		 *  Claude Code's choice (1h on a subscription). A 1h write bills at 2x base input,
+		 *  a 5m one at 1.25x; 5m is cheaper unless requests are often 5-60 min apart. */
+		promptCacheTtl?: "5m" | "1h";
 	};
 }
 
@@ -50,8 +54,15 @@ export function tryParseJson(path: string): Partial<Config> {
 	}
 }
 
-export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMemoryEnabled: boolean } {
-	return { autoMemoryEnabled: provider.autoMemoryEnabled ?? false };
+export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMemoryEnabled: boolean; promptCacheTtl?: "5m" | "1h" } {
+	const ttl = provider.promptCacheTtl;
+	if (ttl !== undefined && ttl !== "5m" && ttl !== "1h") {
+		console.error(`claude-delegation: ignoring provider.promptCacheTtl ${JSON.stringify(ttl)}; expected "5m" or "1h"`);
+	}
+	return {
+		autoMemoryEnabled: provider.autoMemoryEnabled ?? false,
+		...(ttl === "5m" || ttl === "1h" ? { promptCacheTtl: ttl } : {}),
+	};
 }
 
 export function globalConfigPath(): string {
