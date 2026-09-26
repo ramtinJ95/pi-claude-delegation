@@ -25,6 +25,24 @@ describe("claudeCodeSettings", () => {
 		assert.deepEqual(claudeCodeSettings(), { autoMemoryEnabled: false });
 	});
 
+	it("leaves the prompt cache TTL to Claude Code unless configured", () => {
+		assert.equal("promptCacheTtl" in claudeCodeSettings(), false);
+		assert.equal(claudeCodeSettings({ promptCacheTtl: "5m" }).promptCacheTtl, "5m");
+		assert.equal(claudeCodeSettings({ promptCacheTtl: "1h" }).promptCacheTtl, "1h");
+	});
+
+	it("drops an unknown prompt cache TTL rather than passing it to Claude Code", () => {
+		const original = console.error;
+		const errors = [];
+		console.error = (message) => errors.push(message);
+		try {
+			assert.deepEqual(claudeCodeSettings({ promptCacheTtl: "10m" }), { autoMemoryEnabled: false });
+		} finally {
+			console.error = original;
+		}
+		assert.match(errors[0], /promptCacheTtl "10m"/);
+	});
+
 	it("allows auto-memory to be enabled", () => {
 		assert.deepEqual(claudeCodeSettings({ autoMemoryEnabled: true }), { autoMemoryEnabled: true });
 	});
