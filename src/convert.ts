@@ -33,11 +33,12 @@ export function sanitizeToolId(id: string, cache: Map<string, string>): string {
  *    `mcp__custom-tools__<pi name>` by construction (resolveMcpTools). The map
  *    is consulted first only because it carries the served tool's exact casing.
  *    A name it lacks is a tool pi ran that we do not serve now — DelegateToClaude
- *    or SpawnClaudeAgent, excluded on purpose, or an extension since disabled — and naming that after
- *    a Claude Code builtin would tell the model a builtin it cannot call is
- *    available and was already used. That is the prompt condition behind the
- *    phantom-call deadlock fixed in 122914dd, and the read direction refuses the
- *    same names for the same reason (piToolNameFor in index.ts).
+ *    or SpawnClaudeAgent, excluded on purpose, or an extension since disabled —
+ *    and naming that after a Claude Code builtin would tell the model a builtin
+ *    it cannot call is available and was already used. That is the prompt
+ *    condition behind the phantom-call deadlock fixed in 122914dd, and the read
+ *    direction refuses the same names for the same reason (piToolNameFor in
+ *    index.ts).
  *  - **Without a map — the DelegateToClaude path.** CC runs its own tools there, so
  *    builtin names are real, matching mapToolName in the other direction.
  */

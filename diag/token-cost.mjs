@@ -59,23 +59,16 @@ function walk(dir, out = []) {
 	return out;
 }
 
-function readEntries(file) {
-	try {
-		return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-	} catch {
-		return null;
-	}
-}
-
 const ours = (m) => m.role === "assistant" && PROVIDERS.has(m.provider);
 const promptOf = (u) => (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-function writeSplit(u, ttl) {
+const newTask = () => ({ requests: 0, cost: 0, tools: new Set() });
+function writeSplit(u) {
 	const w = u.cacheWrite ?? 0;
-	const h = u.cacheWrite1h ?? (ttl === "1h" ? w : 0);
+	const h = u.cacheWrite1h ?? (DEFAULT_TTL === "1h" ? w : 0);
 	return { w5m: w - h, w1h: h };
 }
-function cost(u, ttl = DEFAULT_TTL) {
-	const { w5m, w1h } = writeSplit(u, ttl);
+function cost(u) {
+	const { w5m, w1h } = writeSplit(u);
 	return (u.input ?? 0) * PRICE.input + (u.output ?? 0) * PRICE.output + (u.cacheRead ?? 0) * PRICE.cacheRead
 		+ w5m * PRICE.write5m + w1h * PRICE.write1h;
 }
@@ -86,13 +79,20 @@ const tools = new Map();
 const reread = new Map();
 const firstPrompts = [];
 const cold = [];
-const ttlSim = { observed: 0, as5m: 0, as1h: 0, gaps: { "≤5m": 0, "5–60m": 0, ">60m": 0 } };
+const unreadable = [];
+const ttlSim = { as5m: 0, as1h: 0, gaps: { "≤5m": 0, "5–60m": 0, ">60m": 0 } };
 let sessions = 0;
 
 for (const file of walk(ROOT)) {
 	if (statSync(file).mtimeMs < SINCE) continue;
-	const entries = readEntries(file);
-	if (!entries?.some((e) => e.type === "message" && ours(e.message))) continue;
+	let entries;
+	try {
+		entries = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	} catch (error) {
+		unreadable.push(`${file}: ${error.message}`);
+		continue;
+	}
+	if (!entries.some((e) => e.type === "message" && ours(e.message))) continue;
 	sessions++;
 
 	let task = null;
@@ -115,7 +115,7 @@ for (const file of walk(ROOT)) {
 		const m = e.message;
 		if (m.role === "user") {
 			if (task?.requests) tasks.push(task);
-			task = { requests: 0, cost: 0, tools: new Set() };
+			task = newTask();
 			appended.push({ source: "user message", chars: JSON.stringify(m.content).length });
 			events.push("user");
 			continue;
@@ -140,7 +140,7 @@ for (const file of walk(ROOT)) {
 		const prompt = promptOf(u);
 		if (prompt === 0) continue;
 
-		const { w5m, w1h } = writeSplit(u, DEFAULT_TTL);
+		const { w5m, w1h } = writeSplit(u);
 		totals.requests++;
 		totals.input += u.input ?? 0;
 		totals.output += u.output ?? 0;
@@ -148,7 +148,7 @@ for (const file of walk(ROOT)) {
 		totals.w5m += w5m;
 		totals.w1h += w1h;
 		if (u.cacheWrite1h != null) totals.recordedTtl++;
-		task ??= { requests: 0, cost: 0, tools: new Set() };
+		task ??= newTask();
 		task.requests++;
 		task.cost += cost(u);
 
@@ -175,14 +175,14 @@ for (const file of walk(ROOT)) {
 			}
 		}
 
-		// Replay this request under each TTL: a gap past the TTL re-writes the whole prompt.
-		ttlSim.observed += cost(u);
-		for (const [key, ttl, limit] of [["as5m", "5m", 5], ["as1h", "1h", 60]]) {
-			const expired = gapMin != null && gapMin > limit && !(gapMin > 60);
-			const writes = expired ? (u.cacheRead ?? 0) + (u.cacheWrite ?? 0) : (u.cacheWrite ?? 0);
-			const reads = expired ? 0 : (u.cacheRead ?? 0);
-			ttlSim[key] += (u.input ?? 0) + (u.output ?? 0) * PRICE.output + reads * PRICE.cacheRead + writes * (ttl === "1h" ? PRICE.write1h : PRICE.write5m);
-		}
+		// Replay this request with every write at each TTL. A 5–60 min gap would have
+		// expired a 5m cache and re-written the whole prompt; a longer one missed under
+		// 1h too, so the observed reads and writes already reflect it.
+		const base = (u.input ?? 0) + (u.output ?? 0) * PRICE.output;
+		ttlSim.as1h += base + (u.cacheRead ?? 0) * PRICE.cacheRead + (u.cacheWrite ?? 0) * PRICE.write1h;
+		ttlSim.as5m += gapMin > 5 && gapMin <= 60
+			? base + prompt * PRICE.write5m
+			: base + (u.cacheRead ?? 0) * PRICE.cacheRead + (u.cacheWrite ?? 0) * PRICE.write5m;
 		if (gapMin != null) ttlSim.gaps[gapMin <= 5 ? "≤5m" : gapMin <= 60 ? "5–60m" : ">60m"]++;
 
 		prev = { t, prompt, output: u.output ?? 0 };
@@ -201,6 +201,7 @@ const quantile = (xs, q) => {
 	return s.length ? s[Math.min(s.length - 1, Math.floor(q * s.length))] : 0;
 };
 
+for (const line of unreadable) console.error(`skipped unreadable session ${line}`);
 if (totals.requests === 0) {
 	console.log(`no ${[...PROVIDERS].join("/")} requests under ${ROOT}`);
 	process.exit(0);
