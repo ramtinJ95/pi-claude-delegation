@@ -8,6 +8,7 @@ upstream history under the MIT license.
 
 - **Fix: stop sending AGENTS.md twice on the provider path** — Claude Code 2.1.281 loads `AGENTS.md` as project memory, so the file Pi already projects into the system prompt arrived a second time on every request, inside Claude Code's "OVERRIDE any default behavior" preamble. The provider now excludes `**/AGENTS.md` from Claude Code's memory load; delegation keeps it, since that path forwards no Pi context files. Pinned in `tests/int-cc-contracts.mjs`.
 - **Fix: leave SpawnClaudeAgent out of the provider's tool list** — It refuses to run when the active provider is claude-delegation, so serving it only resent its schema on every request and offered the model a call that could only fail. It is now excluded alongside DelegateToClaude. With the AGENTS.md fix this takes ~2.1k tokens off every provider request's prefix in this repository (measured through `diag/capture-proxy.mjs`).
+- **Add: prompt cache telemetry** — Record the 1h share of each request's cache writes as `usage.cacheWrite1h`, and add `diag/token-cost.mjs` for price-weighted cost per task by billing type, per-tool call share and error rate, cold-cache requests, and a 5m-vs-1h TTL replay over recorded sessions.
 - **Bump: Claude Agent SDK 0.3.281** — Develop and test against the SDK (Claude Code 2.1.281) that fresh installs already resolve.
 
 ## 0.1.8 — 2026-09-24

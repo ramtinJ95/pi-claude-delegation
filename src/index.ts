@@ -658,7 +658,11 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 
 // --- Usage helpers ---
 
-function updateUsage(output: AssistantMessage, usage: Record<string, number | undefined>, model: Model<any>): void {
+type SdkUsage = Record<string, number | undefined> & {
+	cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } | null;
+};
+
+function updateUsage(output: AssistantMessage, usage: SdkUsage, model: Model<any>): void {
 	if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
 	if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
 	if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
@@ -666,12 +670,18 @@ function updateUsage(output: AssistantMessage, usage: Record<string, number | un
 	// Claude Code may report reasoning/thinking tokens separately, while pi's Usage type does not model that field.
 	const reasoning = usage.reasoning_tokens ?? usage.thinking_tokens;
 	if (reasoning != null) (output.usage as typeof output.usage & { reasoning?: number }).reasoning = reasoning;
+	// A 1h cache write bills at 2x base input and a 5m one at 1.25x, and Claude Code
+	// picks the TTL itself. pi's Usage has one cacheWrite field, so the 1h share rides
+	// alongside it for diag/token-cost.mjs to price the writes it cannot tell apart.
+	const cacheWrite1h = usage.cache_creation?.ephemeral_1h_input_tokens;
+	if (cacheWrite1h != null) (output.usage as typeof output.usage & { cacheWrite1h?: number }).cacheWrite1h = cacheWrite1h;
 	output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 	calculateCost(model, output.usage);
 	const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
 	const cachePct = promptTokens > 0 ? Math.round(output.usage.cacheRead / promptTokens * 100) : 0;
 	const reasoningText = reasoning != null ? ` reasoning=${reasoning}` : "";
-	debug(`usage: in=${output.usage.input} out=${output.usage.output} cacheRead=${output.usage.cacheRead} cacheWrite=${output.usage.cacheWrite} total=${output.usage.totalTokens}${reasoningText} cachePct=${cachePct}% model=${model.id}`);
+	const ttlText = cacheWrite1h != null ? ` cacheWrite1h=${cacheWrite1h}` : "";
+	debug(`usage: in=${output.usage.input} out=${output.usage.output} cacheRead=${output.usage.cacheRead} cacheWrite=${output.usage.cacheWrite} total=${output.usage.totalTokens}${reasoningText} cachePct=${cachePct}% model=${model.id}${ttlText}`);
 }
 
 // Log the *served* context window reported by an SDK result message
