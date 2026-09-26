@@ -110,6 +110,13 @@ const CC_CHILD_ENV = {
 // while rules need their own. Managed/policy memory is not excludable by design.
 const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/.claude/rules/**"];
 
+// Claude Code 2.1.281 also loads AGENTS.md as project memory. On the provider path
+// Pi already projects that file into the system prompt, so CC's copy arrived a
+// second time on every request, wrapped in its "OVERRIDE any default behavior"
+// preamble. Delegation keeps it: that path forwards no Pi context files, so CC's
+// own load is how a delegated Claude sees the project's AGENTS.md.
+const PROVIDER_CLAUDE_MD_EXCLUDES = [...CLAUDE_MD_EXCLUDES, "**/AGENTS.md"];
+
 // Ensure log directories exist when debug is enabled
 if (DEBUG) {
 	try {
@@ -195,7 +202,7 @@ const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-delegation:activeStreamSimpl
 // calling a hook with a made-up payload or response would be worse than an
 // honest compatibility limitation. See docs/PI-COMPATIBILITY.md.
 const PROVIDER_HOOK_SUPPORT = Object.freeze({
-	reviewedAgentSdk: "0.3.280",
+	reviewedAgentSdk: "0.3.281",
 	onPayload: false,
 	onResponse: false,
 });
@@ -430,6 +437,7 @@ export const __test = {
 	deliverToolResults,
 	drainForAbort,
 	CC_CHILD_ENV,
+	PROVIDER_CLAUDE_MD_EXCLUDES,
 	buildMcpServers,
 	branchSummaryOutcome,
 	PROVIDER_HOOK_SUPPORT,
@@ -1437,7 +1445,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// Ported from pi-claude-bridge deb1f31 (issue #73).
 		settings: {
 			...claudeCodeSettings(providerSettings),
-			claudeMdExcludes: CLAUDE_MD_EXCLUDES,
+			claudeMdExcludes: PROVIDER_CLAUDE_MD_EXCLUDES,
 			includeGitInstructions: false,
 		},
 		systemPrompt: {

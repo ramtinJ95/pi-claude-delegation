@@ -63,7 +63,7 @@ describe("Pi provider lifecycle hook compatibility", () => {
 		assert.ok(!providerIdentifiers.has("onPayload"), "provider adapter now touches onPayload; verify replacement semantics");
 		assert.ok(!providerIdentifiers.has("onResponse"), "provider adapter now touches onResponse; verify response truthfulness");
 		assert.deepEqual(__test.PROVIDER_HOOK_SUPPORT, {
-			reviewedAgentSdk: "0.3.280",
+			reviewedAgentSdk: "0.3.281",
 			onPayload: false,
 			onResponse: false,
 		});

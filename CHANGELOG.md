@@ -4,6 +4,11 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
+## UNRELEASED
+
+- **Fix: stop sending AGENTS.md twice on the provider path** — Claude Code 2.1.281 loads `AGENTS.md` as project memory, so the file Pi already projects into the system prompt arrived a second time on every request, inside Claude Code's "OVERRIDE any default behavior" preamble. The provider now excludes `**/AGENTS.md` from Claude Code's memory load; delegation keeps it, since that path forwards no Pi context files. Pinned in `tests/int-cc-contracts.mjs`.
+- **Bump: Claude Agent SDK 0.3.281** — Develop and test against the SDK (Claude Code 2.1.281) that fresh installs already resolve.
+
 ## 0.1.8 — 2026-09-24
 
 - **Fix: turns no longer hang after a stalled response stream** — When Claude Code abandons a stalled stream and repeats the request without streaming, deliver that fallback message and drop the dead stream's partial blocks instead of discarding the fallback, which left its tool calls unanswered until the user aborted. Ported from pi-claude-bridge 5919fff.

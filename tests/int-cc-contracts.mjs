@@ -573,6 +573,39 @@ test("--strict-mcp-config suppresses filesystem MCP servers", { timeout: 120_000
 		`filesystem MCP servers survived --strict-mcp-config: ${JSON.stringify(after.mcp_servers)}`);
 });
 
+test("CC loads the cwd AGENTS.md as memory, and the provider's claudeMdExcludes suppresses it", { timeout: 120_000 }, async (t) => {
+	// Pi projects AGENTS.md into the provider's system prompt itself, so CC's own
+	// copy would reach the model twice. getContextUsage lists what CC loaded.
+	const { __test } = await import("../src/index.js");
+	const env = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+	async function memoryPaths(claudeMdExcludes) {
+		const q = query({
+			prompt: "Say OK.",
+			options: { cwd: CWD, model: MODEL, tools: [], permissionMode: "auto", env, maxTurns: 1, persistSession: false, settings: { claudeMdExcludes } },
+		});
+		try {
+			for await (const message of q) {
+				if (message.type === "system" && message.subtype === "init") {
+					const usage = await q.getContextUsage({ detail: "summary" });
+					return usage.memoryFiles.map((file) => file.path);
+				}
+			}
+		} finally {
+			q.close();
+		}
+		throw new Error("no system/init message arrived");
+	}
+	const isAgentsMd = (path) => path.endsWith("/AGENTS.md");
+
+	const loaded = await memoryPaths(["**/CLAUDE.md", "**/.claude/rules/**"]);
+	if (!loaded.some(isAgentsMd)) {
+		t.skip(`this Claude Code does not load AGENTS.md (memory: ${JSON.stringify(loaded)}) — nothing to suppress`);
+		return;
+	}
+	const excluded = await memoryPaths(__test.PROVIDER_CLAUDE_MD_EXCLUDES);
+	assert.deepEqual(excluded.filter(isAgentsMd), [], `AGENTS.md survived the provider excludes: ${JSON.stringify(excluded)}`);
+});
+
 test("delegation default Opus 5.5 accepts high effort", { timeout: 120_000 }, async () => {
 	const { result } = await collect(query({
 		prompt: "Reply with just: OK",
