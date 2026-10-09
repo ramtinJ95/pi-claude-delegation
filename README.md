@@ -22,9 +22,9 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 pi install npm:@ramtinj95/pi-claude-delegation
 ```
 
-This fork requires Pi 0.86.1 or newer and Node.js 22.19 or newer. Upgrade older Pi
+This fork requires Pi 1.1.0 or newer and Node.js 22.19 or newer. Upgrade older Pi
 installations before installing this release. Development and integration tests
-use Pi 0.87.1.
+use Pi 1.1.0.
 
 Version 0.1.0 has clean typecheck and unit/package validation. The manual
 Phase 3d dogfood checks for reload-time worker termination and checkout-write
@@ -355,7 +355,7 @@ this summary is exhaustive.
 
 `npm run test:unit` for offline tests (`tests/unit-*.mjs`: queue, import, skills). 
 
-The offline suite also launches the repository-local Pi 0.87.1 CLI to verify
+The offline suite also launches the repository-local Pi 1.1.0 CLI to verify
 that the extension loads and registers its provider. Test output records the
 installed Pi, Agent SDK, and bundled Claude Code versions.
 
