@@ -59,6 +59,22 @@ error-field capture; its three rejected `[1m]` rows have no recorded HTTP status
 or error text. `opus-4-6[1m]` was confirmed 429 via a separate one-off dump;
 `sonnet-4-6[1m]` and `haiku-4-5[1m]` are assumed the same by analogy.
 
+### Sonnet 5.5 and Haiku 5.5
+
+Measured 2026-10-09 with SDK 0.3.281 (Claude Code 2.1.281) on the maintainer's
+subscription; the plan and credit setting were not recorded, so these rows sit
+outside the table above. Both follow Sonnet 5 and Opus 5: bare ids serve 200K,
+`[1m]` serves 1M.
+
+| requested id              | served  |
+|---------------------------|---------|
+| `claude-sonnet-5-5`       | 200K    |
+| `claude-sonnet-5-5[1m]`   | 1M      |
+| `claude-haiku-5-5`        | 200K    |
+| `claude-haiku-5-5[1m]`    | 1M      |
+
+Raw run: `.test-output/context-size/current-2026-10-09T11-54-00-456Z.json`
+
 ## Error shapes
 
 Rejected `[1m]` turns surface in the SDK message stream, not `result.errors[]`

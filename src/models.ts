@@ -5,7 +5,7 @@
 export const FABLE_MODEL_ID = "claude-fable-5-1";
 const LEGACY_FABLE_MODEL_ID = "claude-fable-5";
 
-export const MODEL_IDS_IN_ORDER = [FABLE_MODEL_ID, "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
+export const MODEL_IDS_IN_ORDER = [FABLE_MODEL_ID, "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-5-5", "claude-haiku-4-5"];
 
 function modelCatalogEntry<T extends { id: string; name?: string; [key: string]: any }>(
 	piAiModels: T[],
@@ -80,6 +80,8 @@ export function resolveClaudeCodeRuntimeModel(modelId: string, settings: LongCon
 		}
 		case FABLE_MODEL_ID:
 			return { cliModelId: `${FABLE_MODEL_ID}[1m]`, contextWindow: ONE_M_CONTEXT };
+		case "claude-sonnet-5-5":
+			return { cliModelId: "claude-sonnet-5-5[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-sonnet-5":
 			return { cliModelId: "claude-sonnet-5[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-sonnet-4-6":
@@ -87,6 +89,8 @@ export function resolveClaudeCodeRuntimeModel(modelId: string, settings: LongCon
 				cliModelId: settings.longContextExtraUsage ? "claude-sonnet-4-6[1m]" : "claude-sonnet-4-6",
 				contextWindow: settings.longContextExtraUsage ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT,
 			};
+		case "claude-haiku-5-5":
+			return { cliModelId: "claude-haiku-5-5[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-haiku-4-5":
 			return { cliModelId: "claude-haiku-4-5", contextWindow: TWO_HUNDRED_K_CONTEXT };
 		default:

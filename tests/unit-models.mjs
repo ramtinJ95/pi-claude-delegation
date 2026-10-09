@@ -90,6 +90,8 @@ describe("Claude Code runtime model policy", () => {
 		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-6", PRO), { cliModelId: "claude-opus-4-6", contextWindow: 200000 });
 		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-sonnet-4-6", PRO), { cliModelId: "claude-sonnet-4-6", contextWindow: 200000 });
 		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-haiku-4-5", PRO), { cliModelId: "claude-haiku-4-5", contextWindow: 200000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-sonnet-5-5", PRO), { cliModelId: "claude-sonnet-5-5[1m]", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-haiku-5-5", PRO), { cliModelId: "claude-haiku-5-5[1m]", contextWindow: 1000000 });
 	});
 
 	it("plan max only changes Opus 4.6", () => {
@@ -198,8 +200,11 @@ describe("resolveModel", () => {
 		);
 	});
 
-	it("haiku shortcut resolves to claude-haiku-4-5", () => {
-		assert.equal(resolveModel(models, "haiku")?.id, "claude-haiku-4-5");
+	it("haiku and sonnet shortcuts resolve to the 5.5 models, and the older IDs still resolve exactly", () => {
+		assert.equal(resolveModel(models, "haiku")?.id, "claude-haiku-5-5");
+		assert.equal(resolveModel(models, "sonnet")?.id, "claude-sonnet-5-5");
+		assert.equal(resolveModel(models, "claude-haiku-4-5")?.id, "claude-haiku-4-5");
+		assert.equal(resolveModel(models, "claude-sonnet-5")?.id, "claude-sonnet-5");
 	});
 
 	it("full ID resolves to itself", () => {
