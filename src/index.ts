@@ -5,7 +5,7 @@ import { createForegroundDelegationExecutor, type ForegroundRunOptions } from ".
 import { registerSpawnClaudeAgent, spawnClaudeAgentToolName } from "./spawn-claude-agent.js";
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
-import { getModels } from "@earendil-works/pi-ai/compat";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { buildSessionContext, compact, generateBranchSummary, type BeforeAgentStartEvent, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, resolveSettings, type EffortLevel, type PermissionMode, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
@@ -207,8 +207,8 @@ const PROVIDER_HOOK_SUPPORT = Object.freeze({
 	onResponse: false,
 });
 
-// MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
-const MODELS = buildModels(getModels("anthropic"));
+// MODELS is buildModels(getBuiltinModels("anthropic")) — projection kept in models.js.
+const MODELS = buildModels(getBuiltinModels("anthropic"));
 let providerSettings: NonNullable<Config["provider"]> = {};
 let longContextSettings: LongContextSettings = { plan: "pro", longContextExtraUsage: false };
 const managedPolicyCache = new Map<string, Promise<ManagedPolicySummary | undefined>>();
