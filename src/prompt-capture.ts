@@ -1,6 +1,7 @@
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { formatProjectContext } from "./agents-md.js";
 import { renderSkillsBlock, type SkillReadTool } from "./skills.js";
+import { renderPromptSection } from "./transcript.js";
 
 // What pi assembled for one agent, kept so the bridge can append only the
 // portable parts after Claude Code's own preset.
@@ -10,6 +11,11 @@ export type PromptCaptureInput = {
 	append?: string;
 	contextFiles: { path: string; content: string }[];
 	skills: Skill[];
+	/** Sections extensions set on the prompt options, in Pi's order: new ones such
+	 *  as Pi's mcp_servers, and overrides of Pi's own sections, such as `addendum`. */
+	sections?: { name: string; content: string }[];
+	/** Tools Pi selected but does not declare to the model, such as `read` under codemode-only. */
+	hiddenTools?: string[];
 };
 
 type InheritedPrompt = {
@@ -19,6 +25,10 @@ type InheritedPrompt = {
 };
 
 export type PromptCapture = PromptCaptureInput & {
+	sections: { name: string; content: string }[];
+	hiddenTools: string[];
+	/** Other renderings this prompt was recorded under; see `record`. */
+	aliases: string[];
 	assembledPrompt: string;
 	/** Exact previously assembled prompts embedded in `custom`. */
 	inherited: InheritedPrompt[];
@@ -47,14 +57,22 @@ export class PromptCaptures {
 	 *  grow keys without limit. */
 	constructor(private readonly limit = 256) {}
 
-	record(systemPrompt: string, input: PromptCaptureInput): void {
-		const existing = this.captures.get(systemPrompt);
+	/** `aliases` are other renderings of the same prompt that a lookup may present,
+	 *  such as the one with extension sections sorted (see transcript.ts). */
+	record(systemPrompt: string, input: PromptCaptureInput, aliases: string[] = []): void {
+		// A key can be another prompt's alias. This exact text gets its own node, or
+		// inheritance, which matches on assembledPrompt, could never find it.
+		const found = this.captures.get(systemPrompt);
+		const existing = found?.assembledPrompt === systemPrompt ? found : undefined;
 		const customChanged = existing?.custom !== input.custom;
 		const capture = existing ?? {
 			...input,
 			assembledPrompt: systemPrompt,
 			contextFiles: [],
 			skills: [],
+			sections: [],
+			hiddenTools: [],
+			aliases: [],
 			inherited: [],
 		};
 
@@ -62,6 +80,8 @@ export class PromptCaptures {
 		capture.append = input.append;
 		capture.contextFiles = input.contextFiles.map((file) => ({ ...file }));
 		capture.skills = [...input.skills];
+		capture.sections = (input.sections ?? []).map((section) => ({ ...section }));
+		capture.hiddenTools = [...(input.hiddenTools ?? [])];
 		if (!existing || customChanged) {
 			capture.inherited = this.findInheritedPrompts(systemPrompt, input.custom);
 		}
@@ -69,6 +89,13 @@ export class PromptCaptures {
 		// Mutate an existing node in place so descendants retain a live reference,
 		// then re-insert its key so Map order tracks recency.
 		this.touch(systemPrompt, capture);
+		for (const alias of aliases) {
+			// Never shadow a prompt recorded under its own text.
+			if (alias === systemPrompt || this.captures.get(alias)?.assembledPrompt === alias) continue;
+			// Kept on the node too, so revival can find it after the key is evicted.
+			if (!capture.aliases.includes(alias)) capture.aliases.push(alias);
+			this.touch(alias, capture);
+		}
 	}
 
 	/** Exact lookup only. Callers serving a query want `resolveOrDerive`. */
@@ -112,22 +139,29 @@ export class PromptCaptures {
 	 * silently discarding policy the user wrote down. A failed turn is recoverable;
 	 * a turn that quietly ignored its instructions is not.
 	 */
-	resolveOrDerive(systemPrompt?: string): PromptCapture | undefined {
+	resolveOrDerive(systemPrompt?: string, alternates: string[] = []): PromptCapture | undefined {
 		if (!systemPrompt) return undefined;
-		const exact = this.captures.get(systemPrompt);
-		if (exact) {
-			this.touch(systemPrompt, exact);
-			return exact;
+		// Every exact rendering before derivation: a prompt that differs only in
+		// section order still embeds older prompts that share its prefix, and
+		// deriving from those would forward Pi's whole prompt as custom text.
+		for (const key of [systemPrompt, ...alternates]) {
+			const exact = this.captures.get(key);
+			if (exact) {
+				this.touch(key, exact);
+				return exact;
+			}
 		}
 
 		// A capture outlives its lookup key: eviction drops the key while inheritance
 		// edges keep the node alive. findInheritedPrompts deliberately skips a node whose
 		// key *is* the prompt, so without this an evicted exact match would derive
 		// nothing and throw. Touching it puts the key back.
-		const revived = this.reachableCaptures().find((node) => node.assembledPrompt === systemPrompt);
-		if (revived) {
-			this.touch(systemPrompt, revived);
-			return revived;
+		for (const key of [systemPrompt, ...alternates]) {
+			const revived = this.reachableCaptures().find((node) => node.assembledPrompt === key || node.aliases.includes(key));
+			if (revived) {
+				this.touch(key, revived);
+				return revived;
+			}
 		}
 
 		const embedded = this.findInheritedPrompts(systemPrompt, systemPrompt);
@@ -143,7 +177,10 @@ export class PromptCaptures {
 		// `custom` is the prompt itself and the edges keep their original offsets, so
 		// projectCustom substitutes the embedded captures in place and preserves every
 		// byte between and around them.
-		return { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], inherited: embedded };
+		// What it wraps was assembled for this same loadout moments earlier, so its
+		// hidden tools still describe what is reachable.
+		const hiddenTools = [...new Set(embedded.flatMap((edge) => edge.parent.hiddenTools))];
+		return { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], sections: [], hiddenTools, aliases: [], inherited: embedded };
 	}
 
 	get size(): number {
@@ -200,6 +237,9 @@ export function sharedPromptCaptures(): PromptCaptures {
 	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures());
 }
 
+/** Pi sections the projection already carries as portable parts. */
+const PORTABLE_SECTIONS = new Set(["project_context", "skills", "addendum"]);
+
 export function projectPromptCapture(
 	capture: PromptCapture,
 	options: { skillReadTool: SkillReadTool },
@@ -219,7 +259,10 @@ export function collectPromptSkills(capture: PromptCapture): Skill[] {
 		if (visiting.has(node)) throw new Error("Cyclic prompt inheritance");
 		visiting.add(node);
 		for (const edge of node.inherited) visit(edge.parent);
-		for (const skill of node.skills) {
+		// A skills-section override replaced this node's roster, so its skills were
+		// never shown and must not hide a descendant's own copy of them.
+		const roster = node.sections.some((section) => section.name === "skills") ? [] : node.skills;
+		for (const skill of roster) {
 			if (skill.disableModelInvocation || seenPaths.has(skill.filePath)) continue;
 			seenPaths.add(skill.filePath);
 			result.push(skill);
@@ -253,11 +296,20 @@ function projectCapture(
 		});
 
 		const custom = projectCustom(capture, options, visiting);
+		// An extension's section replaces what Pi would render under that name, so it
+		// replaces the portable part it supersedes too. Every other section, new or
+		// one of Pi's own, is forwarded as Pi renders it, after the portable parts.
+		// Only the provider projects captures, and its tools are Pi's, so sections
+		// that describe them (mcp_servers) still hold.
+		const override = (name: string) => capture.sections.find((section) => section.name === name)?.content;
 		const parts = [
-			formatProjectContext(capture.contextFiles),
-			renderSkillsBlock(ownSkills, options.skillReadTool),
+			override("project_context") ?? formatProjectContext(capture.contextFiles),
+			override("skills") ?? renderSkillsBlock(ownSkills, options.skillReadTool),
 			custom,
-			capture.append,
+			override("addendum") ?? capture.append,
+			...capture.sections
+				.filter(({ name }) => !PORTABLE_SECTIONS.has(name))
+				.map(({ name, content }) => renderPromptSection(name, content)),
 		].filter((part): part is string => Boolean(part));
 		return parts.length > 0 ? parts.join("\n\n") : undefined;
 	} finally {

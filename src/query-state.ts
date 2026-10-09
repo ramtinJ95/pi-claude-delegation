@@ -6,8 +6,9 @@
 //
 // Extracted from index.ts so tests can import without activating the extension.
 
-import type { AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, AssistantMessageEventStream, Model, Tool } from "@earendil-works/pi-ai";
 import type { McpResult } from "./extract-tool-results.js";
+import type { ToolServer } from "./mcp-server.js";
 import type { PromptStream } from "./prompt-stream.js";
 
 export interface PendingToolCall {
@@ -28,6 +29,13 @@ export class QueryContext {
 	turnToolCallIds: string[] = [];
 	/** Streaming-input handle for the active query — how steers reach CC mid-turn. */
 	promptStream: PromptStream | null = null;
+	/** The MCP server serving pi's tools to this query and the tools it serves.
+	 *  Pi's tool_search can change the set mid-turn; see refreshServedTools. */
+	toolServer: ToolServer | null = null;
+	servedTools: Tool[] = [];
+	/** SDK tool name → pi tool name. consumeQuery holds this map for the whole
+	 *  query, so a mid-turn tool change updates it in place. */
+	toolNameToPi = new Map<string, string>();
 	/** Last rate-limit rejection seen on this query. Claude Code sends it just before the
 	 *  failure it caused, which is the only thing tying the two together. */
 	rateLimitRejection: { rateLimitType?: string; resetsAt?: number } | null = null;

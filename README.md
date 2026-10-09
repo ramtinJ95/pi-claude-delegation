@@ -22,9 +22,9 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 pi install npm:@ramtinj95/pi-claude-delegation
 ```
 
-This fork requires Pi 0.86.1 or newer and Node.js 22.19 or newer. Upgrade older Pi
+This fork requires Pi 1.1.0 or newer and Node.js 22.19 or newer. Upgrade older Pi
 installations before installing this release. Development and integration tests
-use Pi 0.87.1.
+use Pi 1.1.0.
 
 Version 0.1.0 has clean typecheck and unit/package validation. The manual
 Phase 3d dogfood checks for reload-time worker termination and checkout-write
@@ -46,7 +46,7 @@ the old config automatically:
 
 ## Provider
 
-Use `/model` to select `claude-delegation/claude-fable-5-1`, `claude-delegation/claude-opus-5-5`, `claude-delegation/claude-opus-5`, `claude-delegation/claude-opus-4-8`, `claude-delegation/claude-opus-4-7`, `claude-delegation/claude-opus-4-6`, `claude-delegation/claude-sonnet-5`, `claude-delegation/claude-sonnet-4-6`, or `claude-delegation/claude-haiku-4-5`. The `fable` shortcut and stale `claude-fable-5` requests are forced to Fable 5.1; this package no longer invokes Fable 5.
+Use `/model` to select `claude-delegation/claude-fable-5-1`, `claude-delegation/claude-opus-5-5`, `claude-delegation/claude-opus-5`, `claude-delegation/claude-opus-4-8`, `claude-delegation/claude-opus-4-7`, `claude-delegation/claude-opus-4-6`, `claude-delegation/claude-sonnet-5-5`, `claude-delegation/claude-sonnet-5`, `claude-delegation/claude-sonnet-4-6`, `claude-delegation/claude-haiku-5-5`, or `claude-delegation/claude-haiku-4-5`. The `sonnet` and `haiku` shortcuts select the 5.5 models. The `fable` shortcut and stale `claude-fable-5` requests are forced to Fable 5.1; this package no longer invokes Fable 5.
 
 Behind the scenes, pi's tools are bridged to Claude Code but it should all work like normal in pi. Bash commands get a 120-second default timeout (matching Claude Code's default) since pi's bash has no timeout by default. Skills in pi are copied over to Claude Code's system prompt so should work as they would with any other pi provider. Steering works mid-turn: a message sent while Claude is running a tool reaches it at that tool boundary, not after the whole turn finishes.
 
@@ -355,7 +355,7 @@ this summary is exhaustive.
 
 `npm run test:unit` for offline tests (`tests/unit-*.mjs`: queue, import, skills). 
 
-The offline suite also launches the repository-local Pi 0.87.1 CLI to verify
+The offline suite also launches the repository-local Pi 1.1.0 CLI to verify
 that the extension loads and registers its provider. Test output records the
 installed Pi, Agent SDK, and bundled Claude Code versions.
 

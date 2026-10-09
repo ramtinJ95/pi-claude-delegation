@@ -1,11 +1,11 @@
 import { createSharedSessionSynchronizer, turnStart, type SessionState } from "./shared-session.js";
 import { createIsolatedSummaryStreamFn } from "./isolated-summary.js";
-import { toBridgeContext } from "./transcript.js";
+import { alternatePromptKeys, isBuiltinPromptSection, sortedExtensionSectionsKey, toBridgeContext } from "./transcript.js";
 import { createForegroundDelegationExecutor, type ForegroundRunOptions } from "./foreground-delegation.js";
 import { registerSpawnClaudeAgent, spawnClaudeAgentToolName } from "./spawn-claude-agent.js";
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
-import { getModels } from "@earendil-works/pi-ai/compat";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { buildSessionContext, compact, generateBranchSummary, type BeforeAgentStartEvent, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, resolveSettings, type EffortLevel, type PermissionMode, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
@@ -17,7 +17,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText } from "./convert.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, normalizeClaudeModelRequest, resolveModel as _resolveModel } from "./models.js";
-import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
+import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock, type SkillReadTool } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
@@ -27,8 +27,9 @@ import {
 	collectPromptSkills,
 	projectPromptCapture,
 	sharedPromptCaptures,
+	type PromptCapture,
 } from "./prompt-capture.js";
-import { createToolServer } from "./mcp-server.js";
+import { createToolServer, type McpToolDef } from "./mcp-server.js";
 import { askClaudeContextTags, buildAskClaudeContract } from "./askclaude-contract.js";
 import { clearLiveAskClaudeCall, registerClaudeSessionsUI, type ClaudeSessionsUIHandle } from "./claude-sessions-overlay.js";
 import {
@@ -207,8 +208,8 @@ const PROVIDER_HOOK_SUPPORT = Object.freeze({
 	onResponse: false,
 });
 
-// MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
-const MODELS = buildModels(getModels("anthropic"));
+// MODELS is buildModels(getBuiltinModels("anthropic")) — projection kept in models.js.
+const MODELS = buildModels(getBuiltinModels("anthropic"));
 let providerSettings: NonNullable<Config["provider"]> = {};
 let longContextSettings: LongContextSettings = { plan: "pro", longContextExtraUsage: false };
 const managedPolicyCache = new Map<string, Promise<ManagedPolicySummary | undefined>>();
@@ -440,6 +441,9 @@ export const __test = {
 	PROVIDER_CLAUDE_MD_EXCLUDES,
 	resolveMcpTools,
 	buildMcpServers,
+	refreshServedTools,
+	refreshThenDeliver,
+	providerSkillReadTool,
 	branchSummaryOutcome,
 	PROVIDER_HOOK_SUPPORT,
 	askClaudeResultIsError,
@@ -628,9 +632,8 @@ function resolveMcpTools(context: Context): {
 // it, and a handler that runs first parks its resolver in `pendingToolCalls`.
 // Handlers close over the captured `queryCtx`, ensuring they operate on the
 // correct query's state while multiple queries run concurrently.
-function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, ReturnType<typeof createToolServer>> | undefined {
-	if (!tools.length) return undefined;
-	const mcpTools = tools.map((tool) => ({
+function mcpToolDefs(tools: Tool[], queryCtx: QueryContext): McpToolDef[] {
+	return tools.map((tool) => ({
 		name: tool.name,
 		description: tool.description,
 		inputSchema: tool.parameters,
@@ -647,7 +650,67 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 			});
 		},
 	}));
-	return { [MCP_SERVER_NAME]: createToolServer(MCP_SERVER_NAME, mcpTools) };
+}
+
+function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, ReturnType<typeof createToolServer>> | undefined {
+	queryCtx.servedTools = tools;
+	queryCtx.toolServer = tools.length ? createToolServer(MCP_SERVER_NAME, mcpToolDefs(tools, queryCtx)) : null;
+	return queryCtx.toolServer ? { [MCP_SERVER_NAME]: queryCtx.toolServer } : undefined;
+}
+
+/** Pi's reader order: `read`, then `bash`, then either one hidden but reachable,
+ *  as codemode-only leaves them, where Pi keeps the skills and names no tool. */
+function providerSkillReadTool(mcpTools: Tool[], capture: PromptCapture): SkillReadTool {
+	if (mcpTools.some((tool) => tool.name === "read")) return "mcp";
+	if (mcpTools.some((tool) => tool.name === "bash")) return "mcp-bash";
+	return capture.hiddenTools.some((tool) => tool === "read" || tool === "bash") ? "indirect" : "none";
+}
+
+function sameTools(a: Tool[], b: Tool[]): boolean {
+	return a.length === b.length && a.every((tool, i) => tool === b[i] || (
+		tool.name === b[i].name
+		&& tool.description === b[i].description
+		&& JSON.stringify(tool.parameters) === JSON.stringify(b[i].parameters)
+	));
+}
+
+/** Pi's tool_search activates tools mid-turn and tells the model they are
+ *  available on its next call, which in this query is the request after the
+ *  tool result being delivered. Serve the new set first: Claude Code re-lists on
+ *  tools/list_changed, and the result is held until it has. */
+async function refreshServedTools(c: QueryContext, context: Context, signal?: AbortSignal): Promise<void> {
+	const { mcpTools, customToolNameToPi } = resolveMcpTools(context);
+	if (sameTools(c.servedTools, mcpTools)) return;
+	const names = mcpTools.map((tool) => tool.name).join(",");
+	if (!c.toolServer) {
+		debug(`provider: tool set changed mid-turn, but this query has no MCP server to update; Claude sees it from the next query: ${names}`);
+		return;
+	}
+	// The top-level context outlives its query. If this one ends during the wait
+	// and the next claims the context, that query's tool state must not be touched.
+	const owningQuery = c.activeQuery;
+	let relisted: boolean;
+	try {
+		relisted = await c.toolServer.replaceTools(mcpToolDefs(mcpTools, c), { signal });
+	} catch (error) {
+		// The served list is unchanged, so leave servedTools stale: the next
+		// tool-result call sees the difference again and retries.
+		debug(`WARNING: could not serve the changed tool set: ${names}`, error);
+		piUI?.notify(`Claude bridge: could not serve newly loaded tools to Claude Code: ${errorMessage(error)}`, "warning");
+		return;
+	}
+	if (c.activeQuery !== owningQuery) return;
+	// The server swapped its list even if the re-list timed out. Claude cannot
+	// call a new tool before this result is delivered, so the map is in time.
+	c.servedTools = mcpTools;
+	c.toolNameToPi.clear();
+	for (const [sdkName, piName] of customToolNameToPi) c.toolNameToPi.set(sdkName, piName);
+	if (relisted) {
+		debug(`provider: tool set changed mid-turn, Claude Code re-listed: ${names}`);
+	} else if (!signal?.aborted) {
+		debug(`WARNING: tool set changed mid-turn, but Claude Code did not re-list in time: ${names}`);
+		piUI?.notify("Claude bridge: Claude Code did not pick up newly loaded tools; they become available from the next prompt", "warning");
+	}
 }
 
 // --- Usage helpers ---
@@ -1206,6 +1269,38 @@ function steerMissedSession(text: string): void {
  *
  *  Both the post-tool-call drain and the FIFO ordering are CC CLI internals,
  *  not SDK contract — tests/int-tool-message.mjs is the tripwire if they move. */
+/** Serve any tool-set change, then release the turn's tool results.
+ *
+ *  A failed refresh must not strand the results, so delivery follows it either
+ *  way. But the refresh can wait on Claude Code, and the top-level context is
+ *  reused by the next query: if the query that owned these results ended
+ *  meanwhile (an abort), they have nowhere to go, and the steer must not reach
+ *  the next query's stdin, so steerMissedSession routes it through a rebuild. */
+async function refreshThenDeliver(
+	c: QueryContext,
+	context: Context,
+	results: McpResult[],
+	steer: ContentBlockParam[] | null,
+	signal?: AbortSignal,
+): Promise<void> {
+	const owningQuery = c.activeQuery;
+	try {
+		await refreshServedTools(c, context, signal);
+	} catch (error) {
+		debug(`provider: serving the changed tool set failed:`, error);
+	}
+	if (c.activeQuery !== owningQuery) {
+		debug(`provider: query ended while its tool set was refreshed; dropping ${results.length} result(s)`);
+		if (steer) steerMissedSession(steerText(steer));
+		return;
+	}
+	await deliverToolResults(c, results, steer, context.messages.length);
+}
+
+function steerText(steer: ContentBlockParam[]): string {
+	return steer.map((b) => (b.type === "text" ? b.text : "[image]")).join("\n");
+}
+
 async function deliverToolResults(
 	c: QueryContext,
 	results: McpResult[],
@@ -1213,7 +1308,7 @@ async function deliverToolResults(
 	contextLength: number,
 ): Promise<void> {
 	if (steer) {
-		const text = steer.map((b) => (b.type === "text" ? b.text : "[image]")).join("\n");
+		const text = steerText(steer);
 		if (!c.promptStream) {
 			debug(`WARNING: steer with no prompt stream, dropping: ${text.slice(0, 60)}`);
 			steerMissedSession(text);
@@ -1269,6 +1364,8 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	showStartupNoticeOnce();
+	// Read from the transcript's system messages, which normalization strips.
+	const promptKeyAlternates = alternatePromptKeys(context);
 	// Normalize before any prompt lookup, tool routing, or session cursor write.
 	context = toBridgeContext(context);
 	// Pi's completeSummarization marks all one-off summaries this way, including
@@ -1300,10 +1397,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// active query: a steer sent while a tool was executing, drained by pi at
 		// the turn boundary and appended alongside the tool result.
 		const steer = lastMsgRole === "user" ? steerBlocks(context.messages) : null;
-		// Delivery is async because the steer must reach CC's stdin *before* the
-		// tool result does — see deliverToolResults. Detached so the provider
-		// still returns its stream synchronously.
-		void deliverToolResults(resultCtx, allResults, steer, context.messages.length);
+		// Delivery is async because a changed tool set must be served, and the
+		// steer must reach CC's stdin, *before* the tool result does — see
+		// refreshThenDeliver. Detached so the provider still returns its stream
+		// synchronously.
+		void refreshThenDeliver(resultCtx, context, allResults, steer, options?.signal);
 		// The shared cursor tracks the top-level conversation. A reentrant subagent
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next
@@ -1350,11 +1448,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
 	// custom override embeds its parent's assembled Pi prompt; recursive projection
 	// replaces that exact inherited prompt with its already-safe portable parts.
-	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
+	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt, promptKeyAlternates);
 	const systemPromptAppend = promptCapture
-		? projectPromptCapture(promptCapture, {
-			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
-		})
+		? projectPromptCapture(promptCapture, { skillReadTool: providerSkillReadTool(mcpTools, promptCapture) })
 		: undefined;
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
@@ -1406,6 +1502,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	void promptStream.push(userMessage(promptBlocks ?? [{ type: "text", text: promptText }]))
 		.catch((error) => debug(`provider: initial prompt push rejected:`, error));
 	queryCtx.promptStream = promptStream;
+	queryCtx.toolNameToPi = customToolNameToPi;
 	const mcpServers = buildMcpServers(mcpTools, queryCtx);
 
 	// MCP auto-loading suppression: CC reads MCP servers from ~/.claude.json (top-level
@@ -1818,13 +1915,23 @@ export default function (pi: ExtensionAPI) {
 		// Preserve the existing exact/inherited resolver: recording a wrapper
 		// under the old inputs would silently discard the wrapper's instructions.
 		if (options?.forceSystemPrompt !== undefined) return;
-		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
+		// Pi keeps skills while either reader is selected, declared or not.
+		const hasRead = !options?.selectedTools || options.selectedTools.some((tool) => tool === "read" || tool === "bash");
+		// Pi renders a section only when it has content. A name Pi owns replaces
+		// its own section in place; any other is appended, and only those are
+		// reordered by replay.
+		const sections = Object.entries(options?.sections ?? {})
+			.filter(([, content]) => content)
+			.map(([name, content]) => ({ name, content }));
+		const sortedKey = sortedExtensionSectionsKey(systemPrompt, sections.filter(({ name }) => !isBuiltinPromptSection(name)));
 		promptCaptures.record(systemPrompt, {
 			custom: options?.customPrompt,
 			append: options?.appendSystemPrompt,
 			contextFiles: options?.contextFiles ?? [],
 			skills: hasRead ? options?.skills ?? [] : [],
-		});
+			sections,
+			hiddenTools: options?.hiddenTools ?? [],
+		}, sortedKey ? [sortedKey] : []);
 	}
 	pi.on("before_agent_start", (event) => {
 		lastSystemPromptOptions = event.systemPromptOptions;
@@ -2005,6 +2112,9 @@ export default function (pi: ExtensionAPI) {
 			label: askConf?.label ?? "Delegate to Claude",
 			description: askContract.toolDescription,
 			parameters: askClaudeParams,
+			// Orchestrates another agent: declared to the model, never callable from
+			// codemode scripts, where under this provider it could only fail.
+			exposure: "model-only",
 			renderCall(args, theme) {
 				let text = theme.fg("mdLink", theme.bold("DelegateToClaude "));
 				const tags = askClaudeContextTags(args, askContract);

@@ -163,6 +163,49 @@ test("tools/call names the bare tool, not the mcp__server__tool alias", { timeou
 	assert.deepEqual(calls.map((c) => c.name), ["alpha"]);
 });
 
+test("tools/list_changed during a tool call makes a new tool callable in the same turn", { timeout: 180_000 }, async () => {
+	// Pi's tool_search activates tools mid-turn and tells the model they are
+	// available on its next call. The bridge serves them by swapping its MCP tool
+	// list, sending tools/list_changed, and holding the search result until CC has
+	// re-listed. Pin both halves: CC re-lists on the notification, and the loop
+	// that is already running offers the new tool on its next request.
+	const tools = [{ name: "loader", description: "Makes the `secret` tool available. Call it first.", inputSchema: { type: "object", properties: {} } }];
+	const calls = [];
+	let listRequests = 0;
+	let onList = null;
+	const server = new McpServer({ name: "custom-tools", version: "1.0.0" }, { capabilities: { tools: { listChanged: true } } });
+	server.server.setRequestHandler(ListToolsRequestSchema, () => {
+		listRequests++;
+		onList?.();
+		return { tools };
+	});
+	server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+		calls.push(request.params.name);
+		if (request.params.name === "secret") return { content: [{ type: "text", text: "SECRET-VALUE-7731" }] };
+		tools.push(noArgTool("secret"));
+		const relisted = new Promise((resolve) => { onList = resolve; });
+		await server.server.sendToolListChanged();
+		const outcome = await Promise.race([relisted.then(() => "relisted"), new Promise((resolve) => setTimeout(() => resolve("timeout"), 10_000))]);
+		assert.equal(outcome, "relisted", "CC never re-listed tools after tools/list_changed");
+		return { content: [{ type: "text", text: "Loaded 1 tool: secret. It is available from your next call." }] };
+	});
+	const allowed = new Set(["mcp__custom-tools__loader", "mcp__custom-tools__secret"]);
+	const { result } = await collect(query({
+		prompt: "Call the loader tool. It makes a new tool named `secret` available. Then call the secret tool and reply with exactly what it returned.",
+		options: providerOptions({
+			mcpServers: { "custom-tools": { type: "sdk", name: "custom-tools", instance: server } },
+			allowedTools: [...allowed],
+			canUseTool: async (toolName, input, options) => allowed.has(toolName)
+				? { behavior: "allow", updatedInput: input, toolUseID: options.toolUseID }
+				: { behavior: "deny", message: `Unexpected tool ${toolName}`, toolUseID: options.toolUseID },
+		}),
+	}));
+
+	assert.ok(listRequests >= 2, `CC listed tools ${listRequests} time(s); expected a re-list after tools/list_changed`);
+	assert.deepEqual(calls, ["loader", "secret"], `the new tool was not callable in the same turn: ${JSON.stringify(calls)}`);
+	assert.match(String(result?.result ?? ""), /SECRET-VALUE-7731/);
+});
+
 // --- `tools: []` and the unserved-tool premise ---
 
 test("tools: [] exposes no builtin tools — only what we serve over MCP", { timeout: 60_000 }, async () => {

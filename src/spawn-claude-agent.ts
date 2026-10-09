@@ -187,6 +187,9 @@ export function registerSpawnClaudeAgent(pi: Pick<ExtensionAPI, "registerTool" |
 		description: "Start a foreground or background (default) Claude Code agent. Background returns a job ID and delivers the result later; do not poll. One background job may run per Pi session."
 			+ (deps.allowFull ? " Full mode requires explicit user delegation; do not edit concurrently with a background full-mode agent." : ""),
 		parameters: spawnClaudeAgentParams,
+		// Orchestrates another agent: declared to the model, never callable from
+		// codemode scripts, where under this provider it could only fail.
+		exposure: "model-only",
 		renderCall(args, theme) {
 			let text = theme.fg("mdLink", theme.bold("SpawnClaudeAgent "));
 			// Restored Phase 3c tool calls still carry `profile`; derive their

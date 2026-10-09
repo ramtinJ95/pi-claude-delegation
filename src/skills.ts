@@ -3,13 +3,19 @@ import { formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-age
 export const MCP_SERVER_NAME = "custom-tools";
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 
-export type SkillReadTool = "mcp" | "native" | "none";
+/** How Claude reads a skill file, mirroring Pi's choice of reader: Pi's `read`
+ *  or `bash` served over MCP, Claude Code's native Read, or `indirect` when Pi
+ *  hides its reader but keeps it reachable, as codemode-only does. */
+export type SkillReadTool = "mcp" | "mcp-bash" | "native" | "indirect" | "none";
 
 export function renderSkillsBlock(skills: Skill[], readTool: SkillReadTool): string | undefined {
 	if (readTool === "none" || skills.length === 0) return undefined;
-	const block = formatSkillsForPrompt(skills).trim();
+	const piReader = readTool === "indirect" ? "indirect" : readTool === "mcp-bash" ? "bash" : "read";
+	const block = formatSkillsForPrompt(skills, piReader).trim();
 	if (!block) return undefined;
-	return readTool === "mcp" ? rewriteSkillsBlock(block) : block;
+	if (readTool === "mcp") return rewriteSkillsBlock(block);
+	if (readTool === "mcp-bash") return block.replace("Use bash to load", `Use bash (${MCP_TOOL_PREFIX}bash) to load`);
+	return block;
 }
 
 export function rewriteSkillsBlock(skillsBlock: string): string {

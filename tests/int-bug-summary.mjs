@@ -3,13 +3,13 @@
 import "./lib/setup.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getModels } from "@earendil-works/pi-ai/compat";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { generateBugReportSummary } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/bug-report.js";
 import { __test } from "../src/index.js";
 
 test("Pi /bug summaries use an isolated query and preserve the provider session", { timeout: 120_000 }, async () => {
 	const model = {
-		...getModels("anthropic").find((model) => model.id === "claude-haiku-4-5"),
+		...getBuiltinModels("anthropic").find((model) => model.id === "claude-haiku-4-5"),
 		provider: "claude-delegation", api: "claude-delegation", baseUrl: "claude-delegation",
 	};
 	const parent = { sessionId: "untouched-parent", cursor: 42, cwd: process.cwd() };
