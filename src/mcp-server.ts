@@ -19,8 +19,15 @@
 // and nothing else, so none of McpServer's higher-level machinery is required.
 // The `McpServer` wrapper is kept only because the SDK's `mcpServers` option is
 // typed against that class. If this breaks after an SDK update, check whether
-// the SDK began inspecting the instance — reading registered tools, or expecting
-// tools/list_changed notifications we never send.
+// the SDK began inspecting the instance, for example by reading registered tools.
+//
+// The served list can change mid-turn: pi's tool_search activates tools and
+// tells the model they are available on its next call. `replaceTools` swaps the
+// list and sends tools/list_changed, and Claude Code re-lists before its next
+// request (pinned in tests/int-cc-contracts.mjs). A removed tool stops being
+// listed but stays callable: Claude Code never dispatches a tool it was not
+// offered (also pinned there), so a call for one can only be a call Claude
+// issued before the removal, whose result pi may already have delivered.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -56,18 +63,31 @@ function assertObjectSchema(tool: McpToolDef): void {
 	}
 }
 
-export function createToolServer(name: string, tools: McpToolDef[]) {
-	const server = new McpServer({ name, version: "1.0.0" }, { capabilities: { tools: {} } });
+// How long a tool result is held for Claude Code to re-list a changed tool set.
+// It re-lists within milliseconds; the bound only keeps a broken contract from
+// stranding the turn, and a timeout is reported, not hidden.
+const RELIST_TIMEOUT_MS = 5_000;
+
+export type ToolServer = ReturnType<typeof createToolServer>;
+
+export function createToolServer(name: string, initialTools: McpToolDef[]) {
+	const server = new McpServer({ name, version: "1.0.0" }, { capabilities: { tools: { listChanged: true } } });
+	let tools = initialTools;
 	const byName = new Map(tools.map((tool) => [tool.name, tool]));
+	let relistWaiters: Array<() => void> = [];
 	for (const tool of tools) assertObjectSchema(tool);
 
-	server.server.setRequestHandler(ListToolsRequestSchema, () => ({
-		tools: tools.map((tool) => ({
+	server.server.setRequestHandler(ListToolsRequestSchema, () => {
+		const listed = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
 			inputSchema: tool.inputSchema as Record<string, unknown>,
-		})),
-	}));
+		}));
+		const waiters = relistWaiters;
+		relistWaiters = [];
+		for (const resolve of waiters) resolve();
+		return { tools: listed };
+	});
 
 	server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 		const tool = byName.get(request.params.name);
@@ -82,5 +102,41 @@ export function createToolServer(name: string, tools: McpToolDef[]) {
 		return { content, isError };
 	});
 
-	return { type: "sdk" as const, name, instance: server };
+	// The SDK reads only type/name/instance; replaceTools rides along for the bridge.
+	return {
+		type: "sdk" as const,
+		name,
+		instance: server,
+		/** Serve `next` instead and notify Claude Code. Throws, leaving the served
+		 *  list unchanged, if a tool cannot go on the wire or the notice cannot be sent. Resolves true once Claude
+		 *  Code has re-listed, false if it did not within the timeout or `signal`
+		 *  aborted first. */
+		async replaceTools(next: McpToolDef[], options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<boolean> {
+			for (const tool of next) assertObjectSchema(tool);
+			const previous = tools;
+			tools = next;
+			for (const tool of next) byName.set(tool.name, tool);
+			let settle: (relisted: boolean) => void = () => {};
+			const relisted = new Promise<boolean>((resolve) => { settle = resolve; });
+			relistWaiters.push(() => settle(true));
+			const timer = setTimeout(() => settle(false), options.timeoutMs ?? RELIST_TIMEOUT_MS);
+			const onAbort = () => settle(false);
+			options.signal?.addEventListener("abort", onAbort, { once: true });
+			if (options.signal?.aborted) settle(false);
+			try {
+				try {
+					await server.server.sendToolListChanged();
+				} catch (error) {
+					// Claude Code was never told, so keep listing what it last saw: the
+					// caller's view of what is served stays true, and it retries.
+					tools = previous;
+					throw error;
+				}
+				return await relisted;
+			} finally {
+				clearTimeout(timer);
+				options.signal?.removeEventListener("abort", onAbort);
+			}
+		},
+	};
 }
