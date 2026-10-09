@@ -2005,6 +2005,9 @@ export default function (pi: ExtensionAPI) {
 			label: askConf?.label ?? "Delegate to Claude",
 			description: askContract.toolDescription,
 			parameters: askClaudeParams,
+			// Orchestrates another agent: declared to the model, never callable from
+			// codemode scripts, where under this provider it could only fail.
+			exposure: "model-only",
 			renderCall(args, theme) {
 				let text = theme.fg("mdLink", theme.bold("DelegateToClaude "));
 				const tags = askClaudeContextTags(args, askContract);
