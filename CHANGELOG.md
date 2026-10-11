@@ -4,7 +4,7 @@ The scoped `@ramtinj95/pi-claude-delegation` package starts at 0.1.0. Entries
 for `pi-claude-bridge` 0.7.0 and earlier are retained below as inherited
 upstream history under the MIT license.
 
-## UNRELEASED
+## 0.2.0 — 2026-10-11
 
 - **Bump: require Pi 1.1.0 and test on 1.1.0** — Develop against exact 1.1.0 `pi-ai`, `pi-coding-agent`, and `pi-tui` and typebox 1.3.27, the versions Pi 1.1 ships, and declare the Pi packages as `"*"` peers, as Pi's package guidance asks. Read the model catalog with `getBuiltinModels` from `@earendil-works/pi-ai/providers/all` instead of the deprecated `getModels` from `@earendil-works/pi-ai/compat`, an entry point Pi plans to delete. Older Pi installations must upgrade before using this release.
 - **Fix: serve tools that tool_search loads mid-turn** — Pi's `tool_search` promises newly activated tools on the model's next call, but the running Claude Code query kept its original tool list until the next prompt. The provider now swaps its MCP tool list, sends `tools/list_changed`, and holds the search result until Claude Code has re-listed, which `tests/int-cc-contracts.mjs` pins. A removed tool still answers calls Claude issued before the removal, a rejected tool set is reported and retried, and an abort during the wait cannot deliver the old turn's results or steer into the next query.
