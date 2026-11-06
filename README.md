@@ -1,4 +1,5 @@
 # @ramtinj95/pi-claude-delegation
+> **Moved:** this package now lives in [ramtinJ95/ramtin-pi-stuff](https://github.com/ramtinJ95/ramtin-pi-stuff/tree/main/packages/pi-claude-delegation). This repository is archived; open issues and pull requests there.
 
 [![npm version](https://img.shields.io/npm/v/@ramtinj95/pi-claude-delegation)](https://www.npmjs.com/package/@ramtinj95/pi-claude-delegation)
 
